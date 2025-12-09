@@ -1,0 +1,19 @@
+{
+  "name": "kandagar",
+  "version": "1.0.0",
+  "description": "Сайт для БПЛА с авторизацией и картой",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": ["map", "authentication", "БПЛА"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "better-sqlite3": "^9.2.2",
+    "bcryptjs": "^2.4.3"
+  }
+}
