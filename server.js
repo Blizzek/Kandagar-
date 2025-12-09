@@ -7,6 +7,12 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ПРИМЕЧАНИЕ: Для продакшена рекомендуется добавить:
+// - Rate limiting (например, express-rate-limit)
+// - CSRF защиту (например, csurf)
+// - Helmet для HTTP заголовков безопасности
+// - HTTPS/SSL сертификаты
+
 // Инициализация базы данных
 const db = new Database('kandagar.db');
 
@@ -51,10 +57,15 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 app.use(session({
-  secret: 'kandagar-secret-key-2024',
+  secret: process.env.SESSION_SECRET || 'kandagar-secret-key-change-in-production',
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 часа
+  cookie: { 
+    maxAge: 24 * 60 * 60 * 1000, // 24 часа
+    secure: process.env.NODE_ENV === 'production', // HTTPS в продакшене
+    httpOnly: true, // Защита от XSS
+    sameSite: 'strict' // Защита от CSRF
+  }
 }));
 
 // Проверка авторизации
@@ -94,8 +105,13 @@ app.post('/api/login', (req, res) => {
 
 // Выход
 app.post('/api/logout', (req, res) => {
-  req.session.destroy();
-  res.json({ success: true });
+  req.session.destroy((err) => {
+    if (err) {
+      console.error('Ошибка при выходе:', err);
+      return res.status(500).json({ error: 'Ошибка при выходе из системы' });
+    }
+    res.json({ success: true });
+  });
 });
 
 // Проверка авторизации
