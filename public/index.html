@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Кандагар - Система управления БПЛА</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Окно авторизации -->
+    <div id="auth-container" class="auth-overlay">
+        <div class="auth-box">
+            <h1>Вход в систему</h1>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="username">Логин:</label>
+                    <input type="text" id="username" name="username" required autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="password">Пароль:</label>
+                    <input type="password" id="password" name="password" required autocomplete="current-password">
+                </div>
+                <div id="error-message" class="error-message"></div>
+                <button type="submit" class="btn btn-primary">Войти</button>
+            </form>
+            <div class="help-text">
+                Тестовый доступ: admin / admin
+            </div>
+        </div>
+    </div>
+
+    <!-- Основной интерфейс -->
+    <div id="main-container" class="hidden">
+        <header>
+            <div class="header-content">
+                <h1>Кандагар - Система управления БПЛА</h1>
+                <div class="user-info">
+                    <span id="username-display"></span>
+                    <button id="logout-btn" class="btn btn-secondary">Выход</button>
+                </div>
+            </div>
+        </header>
+
+        <div class="container">
+            <div class="sidebar">
+                <h2>Метки на карте</h2>
+                <button id="add-marker-btn" class="btn btn-primary">+ Добавить метку</button>
+                <div id="markers-list" class="markers-list"></div>
+            </div>
+
+            <div class="map-container">
+                <div id="map"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно добавления метки -->
+    <div id="add-marker-modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2>Добавить метку</h2>
+            <form id="add-marker-form">
+                <div class="form-group">
+                    <label for="marker-name">Название:</label>
+                    <input type="text" id="marker-name" required>
+                </div>
+                <div class="form-group">
+                    <label for="marker-description">Описание:</label>
+                    <textarea id="marker-description" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="marker-lat">Широта:</label>
+                    <input type="number" id="marker-lat" step="0.0001" required>
+                </div>
+                <div class="form-group">
+                    <label for="marker-lng">Долгота:</label>
+                    <input type="number" id="marker-lng" step="0.0001" required>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">Добавить</button>
+                    <button type="button" class="btn btn-secondary cancel-btn">Отмена</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
