@@ -1,7 +1,7 @@
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
-const Database = require('better-sqlite3');
+const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
 const app = express();
@@ -14,43 +14,69 @@ const PORT = process.env.PORT || 3000;
 // - HTTPS/SSL сертификаты
 
 // Инициализация базы данных
-const db = new Database('kandagar.db');
+const db = new sqlite3.Database('kandagar.db', (err) => {
+  if (err) {
+    console.error('Ошибка подключения к БД:', err);
+  } else {
+    console.log('Подключено к БД');
+  }
+});
 
 // Создание таблиц
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL
-  );
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL
+    )
+  `);
 
-  CREATE TABLE IF NOT EXISTS markers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT,
-    latitude REAL NOT NULL,
-    longitude REAL NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS markers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 
-// Создание тестового пользователя (admin/admin) если его нет
-const checkUser = db.prepare('SELECT * FROM users WHERE username = ?').get('admin');
-if (!checkUser) {
-  const hashedPassword = bcrypt.hashSync('admin', 10);
-  db.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run('admin', hashedPassword);
-  console.log('Создан тестовый пользователь: admin/admin');
-}
+  // Создание тестового пользователя (admin/admin) если его нет
+  db.get('SELECT * FROM users WHERE username = ?', ['admin'], (err, row) => {
+    if (err) {
+      console.error('Ошибка при проверке пользователя:', err);
+    } else if (!row) {
+      const hashedPassword = bcrypt.hashSync('admin', 10);
+      db.run('INSERT INTO users (username, password) VALUES (?, ?)', ['admin', hashedPassword], (err) => {
+        if (err) {
+          console.error('Ошибка при создании пользователя:', err);
+        } else {
+          console.log('Создан тестовый пользователь: admin/admin');
+        }
+      });
+    }
+  });
 
-// Добавление тестовых меток если их нет
-const markerCount = db.prepare('SELECT COUNT(*) as count FROM markers').get();
-if (markerCount.count === 0) {
-  const insertMarker = db.prepare('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)');
-  insertMarker.run('Точка 1', 'Тестовая метка 1', 55.7558, 37.6173); // Москва
-  insertMarker.run('Точка 2', 'Тестовая метка 2', 59.9343, 30.3351); // Санкт-Петербург
-  insertMarker.run('Точка 3', 'Тестовая метка 3', 56.8389, 60.6057); // Екатеринбург
-  console.log('Добавлены тестовые метки');
-}
+  // Добавление тестовых меток если их нет
+  db.get('SELECT COUNT(*) as count FROM markers', (err, row) => {
+    if (err) {
+      console.error('Ошибка при подсчете меток:', err);
+    } else if (row.count === 0) {
+      db.run('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)', 
+        ['Точка 1', 'Тестовая метка 1', 55.7558, 37.6173]);
+      db.run('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)', 
+        ['Точка 2', 'Тестовая метка 2', 59.9343, 30.3351]);
+      db.run('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)', 
+        ['Точка 3', 'Тестовая метка 3', 56.8389, 60.6057], (err) => {
+        if (!err) {
+          console.log('Добавлены тестовые метки');
+        }
+      });
+    }
+  });
+});
 
 // Middleware
 app.use(express.json());
@@ -86,21 +112,26 @@ app.post('/api/login', (req, res) => {
     return res.status(400).json({ error: 'Введите логин и пароль' });
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  
-  if (!user) {
-    return res.status(401).json({ error: 'Неверный логин или пароль' });
-  }
+  db.get('SELECT * FROM users WHERE username = ?', [username], (err, user) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
 
-  const isValid = bcrypt.compareSync(password, user.password);
-  
-  if (!isValid) {
-    return res.status(401).json({ error: 'Неверный логин или пароль' });
-  }
+    if (!user) {
+      return res.status(401).json({ error: 'Неверный логин или пароль' });
+    }
 
-  req.session.userId = user.id;
-  req.session.username = user.username;
-  res.json({ success: true, username: user.username });
+    const isValid = bcrypt.compareSync(password, user.password);
+    
+    if (!isValid) {
+      return res.status(401).json({ error: 'Неверный логин или пароль' });
+    }
+
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    res.json({ success: true, username: user.username });
+  });
 });
 
 // Выход
@@ -125,8 +156,13 @@ app.get('/api/check-auth', (req, res) => {
 
 // Получение меток
 app.get('/api/markers', requireAuth, (req, res) => {
-  const markers = db.prepare('SELECT * FROM markers ORDER BY created_at DESC').all();
-  res.json(markers);
+  db.all('SELECT * FROM markers ORDER BY created_at DESC', (err, markers) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    res.json(markers);
+  });
 });
 
 // Добавление метки
@@ -137,18 +173,34 @@ app.post('/api/markers', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'Укажите название, широту и долготу' });
   }
 
-  const result = db.prepare('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)')
-    .run(name, description || '', latitude, longitude);
-  
-  const marker = db.prepare('SELECT * FROM markers WHERE id = ?').get(result.lastInsertRowid);
-  res.json(marker);
+  db.run('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)',
+    [name, description || '', latitude, longitude],
+    function(err) {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+      
+      db.get('SELECT * FROM markers WHERE id = ?', [this.lastID], (err, marker) => {
+        if (err) {
+          console.error('Ошибка БД:', err);
+          return res.status(500).json({ error: 'Ошибка сервера' });
+        }
+        res.json(marker);
+      });
+    });
 });
 
 // Удаление метки
 app.delete('/api/markers/:id', requireAuth, (req, res) => {
   const { id } = req.params;
-  db.prepare('DELETE FROM markers WHERE id = ?').run(id);
-  res.json({ success: true });
+  db.run('DELETE FROM markers WHERE id = ?', [id], (err) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    res.json({ success: true });
+  });
 });
 
 // Главная страница
