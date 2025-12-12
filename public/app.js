@@ -8,6 +8,9 @@ let routeInterval = null;
 let moveMode = false;
 let moveOriginalId = null;
 let userRole = '';
+let appConfig = { clientMode: false, postId: null };
+let clientMode = false;
+let currentFilters = {};
 
 const statusBar = () => document.getElementById('status-bar');
 const hideRouteBtn = () => document.getElementById('hide-route-btn');
@@ -20,23 +23,27 @@ function setStatus(message, type = 'info', persist = false) {
     if (type === 'warn') bar.classList.add('warn');
     else if (type === 'error') bar.classList.add('error');
     if (!persist) {
-        setTimeout(() => {
-            bar.classList.add('hidden');
-        }, 4000);
+        setTimeout(() => bar.classList.add('hidden'), 4000);
     }
 }
 
-// Проверка авторизации при загрузке
 document.addEventListener('DOMContentLoaded', async () => {
     try {
         const cfgResp = await fetch('/api/config');
-        const cfg = await cfgResp.json();
+        if (cfgResp.ok) {
+            appConfig = await cfgResp.json();
+            clientMode = !!appConfig.clientMode;
+        }
+    } catch (cfgErr) {
+        console.warn('Не удалось получить конфиг', cfgErr);
+    }
+
+    try {
         const response = await fetch('/api/check-auth');
         const data = await response.json();
-        
         if (data.authenticated) {
             userRole = data.role;
-            showMainInterface(data.username, data.role, cfg);
+            showMainInterface(data.username, data.role, appConfig);
         } else {
             showAuthForm();
         }
@@ -46,13 +53,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     const hideBtn = hideRouteBtn();
-    if (hideBtn) {
-        hideBtn.addEventListener('click', () => hideRoute());
-    }
-    const exportWord = document.getElementById('export-word-btn');
-    if (exportWord) exportWord.addEventListener('click', () => window.location.href = '/api/export/word');
+    if (hideBtn) hideBtn.addEventListener('click', () => hideRoute());
 
-    // Обработчик отмены режима перемещения
     const cancelMoveBtn = document.getElementById('cancel-move-btn');
     if (cancelMoveBtn) {
         cancelMoveBtn.addEventListener('click', (ev) => {
@@ -64,85 +66,84 @@ document.addEventListener('DOMContentLoaded', async () => {
             setStatus('Режим перемещения отменён', 'info');
         });
     }
+
+    const applyFiltersBtn = document.getElementById('apply-filters');
+    if (applyFiltersBtn) {
+        applyFiltersBtn.addEventListener('click', () => {
+            const filters = collectFilters();
+            currentFilters = filters;
+            loadTable(filters);
+        });
+    }
 });
 
-// Показать форму авторизации
 function showAuthForm() {
     document.getElementById('auth-container').classList.remove('hidden');
     document.getElementById('main-container').classList.add('hidden');
 }
 
-// Показать основной интерфейс
-function showMainInterface(username, role, cfg = {}) {
+function showMainInterface(username, role, cfg = appConfig) {
+    clientMode = !!(cfg && cfg.clientMode);
     document.getElementById('auth-container').classList.add('hidden');
     document.getElementById('main-container').classList.remove('hidden');
-    
-    const roleNames = {
-        'creator': 'Создатель',
-        'admin': 'Администратор',
-        'operator': 'Оператор'
-    };
-    
+
+    const roleNames = { creator: 'Создатель', admin: 'Администратор', operator: 'Оператор' };
     document.getElementById('username-display').textContent = `${roleNames[role] || role}: ${username}`;
-    
-    // Показываем панель управления пользователями для Creator
+
     if (role === 'creator') {
         document.getElementById('admin-panel').classList.remove('hidden');
         loadUsers();
     }
-    
-    initMap();
-    loadObjects();
-    // Клиентский режим: скрыть кнопки редактирования и обновлять каждые 40 сек только позиции
-    if (cfg.clientMode) {
+
+    if (clientMode) {
         const addBtn = document.getElementById('add-marker-btn');
         if (addBtn) addBtn.classList.add('hidden');
         const adminPanel = document.getElementById('admin-panel');
         if (adminPanel) adminPanel.classList.add('hidden');
-        setInterval(async () => { await loadObjects(); }, 40000);
+    }
+
+    initMap();
+    loadObjects();
+    loadTable(currentFilters);
+
+    if (clientMode) {
+        setInterval(async () => {
+            await loadObjects();
+            await loadTable(currentFilters);
+        }, 40000);
     }
 }
 
-// Обработка формы входа
 document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    
     const username = document.getElementById('username').value;
     const password = document.getElementById('password').value;
     const errorMessage = document.getElementById('error-message');
-    
+
     try {
-        // Пробуем войти как Creator
         let response = await fetch('/api/creator-login', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password })
         });
-        
         let data = await response.json();
-        
+
         if (response.ok && data.status === 'ok') {
             userRole = data.role;
-            showMainInterface(data.username, data.role);
+            showMainInterface(data.username, data.role, appConfig);
             return;
         }
-        
-        // Если не Creator, пробуем Admin/Operator
+
         response = await fetch('/api/user-login', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password })
         });
-        
         data = await response.json();
-        
+
         if (response.ok && data.status === 'ok') {
             userRole = data.role;
-            showMainInterface(data.username, data.role);
+            showMainInterface(data.username, data.role, appConfig);
         } else {
             errorMessage.textContent = data.error || 'Ошибка авторизации';
         }
@@ -152,13 +153,10 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     }
 });
 
-// Выход
 document.getElementById('logout-btn').addEventListener('click', async () => {
     try {
         await fetch('/api/logout', { method: 'POST' });
         showAuthForm();
-        
-        // Очистка карты
         if (map) {
             map.remove();
             map = null;
@@ -169,18 +167,13 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
     }
 });
 
-// Инициализация карты
 function initMap() {
-    // Создаем карту с центром в Москве
     map = L.map('map').setView([55.7558, 37.6173], 5);
-    
-    // Добавляем слой OpenStreetMap
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '© OpenStreetMap contributors',
         maxZoom: 19
     }).addTo(map);
-    
-    // Обработчик клика по карте для добавления меток и перемещения объекта
+
     map.on('click', async (e) => {
         if (moveMode && moveOriginalId) {
             try {
@@ -191,10 +184,11 @@ function initMap() {
                 });
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.error || 'Ошибка перемещения');
-                moveMode = false; moveOriginalId = null;
+                moveMode = false;
+                moveOriginalId = null;
                 const banner = document.getElementById('move-banner');
                 if (banner) banner.classList.add('hidden');
-                await loadObjects();
+                await refreshData();
                 setStatus('Позиция обновлена', 'info');
             } catch (err) {
                 console.error(err);
@@ -207,83 +201,64 @@ function initMap() {
     });
 }
 
-// Загрузка объектов с сервера
 async function loadObjects() {
     try {
         const response = await fetch('/api/objects');
-        
-        if (!response.ok) {
-            throw new Error('Ошибка загрузки объектов');
-        }
-        
+        if (!response.ok) throw new Error('Ошибка загрузки объектов');
         objects = await response.json();
         displayObjects();
     } catch (error) {
         console.error('Ошибка загрузки объектов:', error);
-        alert('Ошибка загрузки объектов');
+        setStatus('Ошибка загрузки объектов', 'error');
     }
 }
 
-// Отображение объектов на карте и в списке
+async function refreshData() {
+    await Promise.all([loadObjects(), loadTable(currentFilters)]);
+}
+
 function displayObjects() {
-    // Очистка существующих маркеров на карте
     Object.values(objectLayers).forEach(marker => map.removeLayer(marker));
     objectLayers = {};
 
-    // Снимаем предыдущий маршрут
-    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
-    
-    // Очистка списка
     const objectsList = document.getElementById('markers-list');
     objectsList.innerHTML = '';
-    
+
     if (objects.length === 0) {
         objectsList.innerHTML = '<p style="color: #999; text-align: center;">Нет объектов</p>';
         return;
     }
-    
-    // Добавление объектов
+
+    const canManage = !clientMode && (userRole === 'creator' || userRole === 'admin' || userRole === 'operator');
+    const canDelete = !clientMode && (userRole === 'creator' || userRole === 'admin');
+
     objects.forEach(obj => {
-        // Добавление на карту (используем lon/lat из WGS-84)
         if (obj.lat && obj.lon) {
-            const mapMarker = L.marker([obj.lat, obj.lon], { draggable: true })
+            const marker = L.marker([obj.lat, obj.lon], { draggable: false })
                 .addTo(map)
                 .bindPopup(`
                     <h3>${obj.name || 'Объект ' + obj.object_number}</h3>
                     <p>Номер: ${obj.object_number}</p>
                     <p>Частота: ${obj.frequency || '-'}</p>
+                    <p>Телеметрия: ${obj.telemetry || '-'}</p>
                     <p>По улитке: ${obj.by_snail || '-'}</p>
-                    <p><small>СК-42: X=${obj.x}, Y=${obj.y}</small></p>
+                    <p>Пост: ${obj.post_id || '-'}</p>
+                    <p>${obj.is_finished ? 'Завершено' : 'Активно'}</p>
+                    <p><small>СК-42: X=${obj.x || '-'}, Y=${obj.y || '-'}</small></p>
                     <p><small>WGS-84: ${obj.lat.toFixed(6)}, ${obj.lon.toFixed(6)}</small></p>
                 `);
-            
-            // По умолчанию перетаскивание выключено, включаем только в режиме перемещения
-            if (mapMarker.dragging) mapMarker.dragging.disable();
+            if (marker.dragging) marker.dragging.disable();
 
-            // Клик по маркеру — выделяем объект в списке
-            mapMarker.on('click', () => {
-                // Найти и подсветить элемент списка соответствующего объекта
-                const items = document.querySelectorAll('.marker-item');
-                items.forEach(el => {
-                    const btn = el.querySelector('.route-btn');
-                    if (btn && Number(btn.getAttribute('data-original')) === obj.original_id) {
-                        el.classList.add('active');
-                        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                    } else {
-                        el.classList.remove('active');
-                    }
-                });
-                // Фокус на маркере
+            marker.on('click', () => {
+                highlightListItem(obj.original_id);
                 map.setView([obj.lat, obj.lon], 12);
-                mapMarker.openPopup();
+                marker.openPopup();
                 setStatus(`Выбрали объект #${obj.object_number}`, 'info');
             });
 
-            // Перемещение маркера перетаскиванием (активно только в moveMode)
-            mapMarker.on('dragend', async (ev) => {
+            marker.on('dragend', async (ev) => {
                 if (!(moveMode && moveOriginalId === obj.original_id)) {
-                    // Откатываем позицию если не в режиме перемещения данного объекта
-                    mapMarker.setLatLng([obj.lat, obj.lon]);
+                    marker.setLatLng([obj.lat, obj.lon]);
                     return;
                 }
                 const pos = ev.target.getLatLng();
@@ -295,110 +270,91 @@ function displayObjects() {
                     });
                     const data = await resp.json();
                     if (!resp.ok) throw new Error(data.error || 'Ошибка перемещения');
-                    moveMode = false; moveOriginalId = null;
+                    moveMode = false;
+                    moveOriginalId = null;
                     const banner = document.getElementById('move-banner');
                     if (banner) banner.classList.add('hidden');
-                    // Мини-уведомление возле маркера
-                    const iconEl = mapMarker._icon;
+                    const iconEl = marker._icon;
                     if (iconEl) {
                         const toast = document.createElement('div');
                         toast.className = 'marker-toast';
                         toast.textContent = 'Перемещено';
                         iconEl.appendChild(toast);
-                        setTimeout(() => { if (toast && toast.parentNode) toast.parentNode.removeChild(toast); }, 1500);
+                        setTimeout(() => toast.remove(), 1500);
                     }
-                    await loadObjects();
+                    await refreshData();
                     setStatus('Позиция обновлена (перетаскивание)', 'info');
                 } catch (err) {
                     console.error(err);
                     setStatus('Не удалось переместить объект', 'error');
-                    // Возвращаем маркер назад
-                    mapMarker.setLatLng([obj.lat, obj.lon]);
+                    marker.setLatLng([obj.lat, obj.lon]);
                 }
             });
 
-            objectLayers[obj.id] = mapMarker;
+            objectLayers[obj.id] = marker;
         }
-        
-        // Добавление в список
+
         const objectItem = document.createElement('div');
         objectItem.className = 'marker-item';
-        
-        // Показываем кнопки в зависимости от роли
-        const deleteButton = (userRole === 'creator' || userRole === 'admin') 
-            ? `<button class="delete-btn" onclick="deleteObject(${obj.id})">Удалить</button>` 
-            : '';
-        const finishButton = (userRole === 'creator' || userRole === 'admin' || userRole === 'operator') && !obj.is_finished
-            ? `<button class="btn btn-secondary finish-btn" data-original="${obj.original_id}">Завершить</button>`
-            : '';
-        const canMove = (userRole === 'creator' || userRole === 'admin' || userRole === 'operator');
-        const moveBtn = canMove ? `<button class="btn btn-secondary move-btn" data-original="${obj.original_id}">Переместить</button>` : '';
+
+        const finishBadge = obj.is_finished ? '<span class="badge-finished">Завершено</span>' : '';
+        const metaPieces = [
+            `№ ${obj.object_number}`,
+            obj.post_id ? `Пост ${obj.post_id}` : null,
+            obj.by_snail ? `Улитка ${obj.by_snail}` : null,
+            obj.is_finished ? 'Статус: завершено' : 'Статус: активно'
+        ].filter(Boolean).join(' · ');
+
+        const deleteButton = canDelete ? `<button class="delete-btn" data-id="${obj.id}">Удалить</button>` : '';
+        const finishButton = canManage && !obj.is_finished ? `<button class="btn btn-secondary finish-btn" data-original="${obj.original_id}">Завершить</button>` : '';
+        const moveBtn = canManage ? `<button class="btn btn-secondary move-btn" data-original="${obj.original_id}">Переместить</button>` : '';
+        const updateBtn = canManage ? `<button class="btn btn-secondary update-btn" data-id="${obj.id}">Дополнить</button>` : '';
         const routeBtn = `<button class="btn btn-secondary route-btn" data-original="${obj.original_id}">Маршрут</button>`;
-        const exportBtns = ``;
-        
+
         objectItem.innerHTML = `
-            <h3>${obj.name || 'Объект ' + obj.object_number}</h3>
-            <p>Номер: ${obj.object_number}</p>
+            <h3>${obj.name || 'Объект ' + obj.object_number} ${finishBadge}</h3>
+            <div class="meta-row">${metaPieces}</div>
             <p>Частота: ${obj.frequency || '-'}</p>
+            <p>Телеметрия: ${obj.telemetry || '-'}</p>
             <p class="coords">СК-42: X=${obj.x || '-'}, Y=${obj.y || '-'}</p>
-            <div class="btn-row">${routeBtn} ${moveBtn} ${finishButton} ${deleteButton}</div>
-                    const fBtn = objectItem.querySelector('.finish-btn');
-                    if (fBtn) {
-                        fBtn.addEventListener('click', async (ev) => {
-                            ev.stopPropagation();
-                            const orig = Number(fBtn.getAttribute('data-original'));
-                            try {
-                                const resp = await fetch('/api/objects/finish', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ original_id: orig })
-                                });
-                                const data = await resp.json();
-                                if (!resp.ok) throw new Error(data.error || 'Ошибка завершения');
-                                setStatus('Информирование завершено', 'info');
-                                await loadObjects();
-                            } catch (e) {
-                                console.error(e);
-                                setStatus('Не удалось завершить информирование', 'error');
-                            }
-                        });
-                    }
-            <div class="btn-row">${exportBtns}</div>
+            <div class="btn-row">${routeBtn} ${moveBtn} ${finishButton} ${updateBtn} ${deleteButton}</div>
         `;
-        
+
         objectItem.addEventListener('click', (e) => {
-            if (!e.target.classList.contains('delete-btn') && obj.lat && obj.lon) {
+            if (e.target.classList.contains('delete-btn')) return;
+            if (obj.lat && obj.lon) {
                 map.setView([obj.lat, obj.lon], 12);
-                objectLayers[obj.id].openPopup();
+                const marker = objectLayers[obj.id];
+                if (marker) marker.openPopup();
                 setStatus(`Выбрали объект #${obj.object_number}`, 'info');
             }
         });
 
+        objectItem.addEventListener('dblclick', () => objectItem.classList.toggle('collapsed'));
+
         if (activeRouteId && obj.original_id === activeRouteId) {
             objectItem.classList.add('active');
         }
-        
-        // Навешиваем обработчики на кнопки маршрута/перемещения
-        const rBtn = objectItem.querySelector('.route-btn');
-        if (rBtn) {
-            rBtn.addEventListener('click', (ev) => {
+
+        const routeBtnEl = objectItem.querySelector('.route-btn');
+        if (routeBtnEl) {
+            routeBtnEl.addEventListener('click', (ev) => {
                 ev.stopPropagation();
-                const orig = rBtn.getAttribute('data-original');
+                const orig = routeBtnEl.getAttribute('data-original');
                 showRoute(orig);
             });
         }
-        const mBtn = objectItem.querySelector('.move-btn');
-        if (mBtn) {
-            mBtn.addEventListener('click', (ev) => {
+
+        const moveBtnEl = objectItem.querySelector('.move-btn');
+        if (moveBtnEl) {
+            moveBtnEl.addEventListener('click', (ev) => {
                 ev.stopPropagation();
-                moveOriginalId = Number(mBtn.getAttribute('data-original'));
+                moveOriginalId = Number(moveBtnEl.getAttribute('data-original'));
                 moveMode = true;
-                setStatus('Режим перемещения: кликните на карте новую позицию', 'warn', true);
+                setStatus('Режим перемещения: кликните на карте новую позицию или перетяните маркер', 'warn', true);
                 const banner = document.getElementById('move-banner');
                 if (banner) banner.classList.remove('hidden');
-                // Включаем перетаскивание для соответствующего маркера
                 Object.entries(objectLayers).forEach(([id, marker]) => {
-                    // Найдём объект по id маркера
                     const objData = objects.find(o => o.id === Number(id));
                     if (!objData || !marker.dragging) return;
                     if (objData.original_id === moveOriginalId) {
@@ -411,22 +367,68 @@ function displayObjects() {
                 });
             });
         }
-        // Убраны кнопки экспорта GeoJSON/GPX
+
+        const finishBtn = objectItem.querySelector('.finish-btn');
+        if (finishBtn) {
+            finishBtn.addEventListener('click', async (ev) => {
+                ev.stopPropagation();
+                const orig = Number(finishBtn.getAttribute('data-original'));
+                try {
+                    const resp = await fetch('/api/objects/finish', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ original_id: orig })
+                    });
+                    const data = await resp.json();
+                    if (!resp.ok) throw new Error(data.error || 'Ошибка завершения');
+                    setStatus('Информирование завершено', 'info');
+                    await refreshData();
+                } catch (e) {
+                    console.error(e);
+                    setStatus('Не удалось завершить информирование', 'error');
+                }
+            });
+        }
+
+        const updateBtnEl = objectItem.querySelector('.update-btn');
+        if (updateBtnEl) {
+            updateBtnEl.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                openUpdateModal(obj);
+            });
+        }
+
+        const deleteBtnEl = objectItem.querySelector('.delete-btn');
+        if (deleteBtnEl) {
+            deleteBtnEl.addEventListener('click', async (ev) => {
+                ev.stopPropagation();
+                await deleteObject(obj.id);
+            });
+        }
 
         objectsList.appendChild(objectItem);
     });
-    
-    // Центрирование карты на всех объектах
-    if (objects.length > 0) {
-        const validObjects = objects.filter(o => o.lat && o.lon);
-        if (validObjects.length > 0) {
-            const bounds = L.latLngBounds(validObjects.map(o => [o.lat, o.lon]));
-            map.fitBounds(bounds, { padding: [50, 50] });
-        }
+
+    const validObjects = objects.filter(o => o.lat && o.lon);
+    if (validObjects.length > 0) {
+        const bounds = L.latLngBounds(validObjects.map(o => [o.lat, o.lon]));
+        map.fitBounds(bounds, { padding: [50, 50] });
     }
 }
 
-// Показ маршрута объекта
+function highlightListItem(originalId) {
+    const items = document.querySelectorAll('.marker-item');
+    items.forEach(el => {
+        const btn = el.querySelector('.route-btn');
+        if (btn && Number(btn.getAttribute('data-original')) === Number(originalId)) {
+            el.classList.add('active');
+            el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+            el.classList.remove('active');
+        }
+    });
+}
+
 async function showRoute(originalId, startTracking = true, silent = false) {
     try {
         const resp = await fetch(`/api/object-route/${originalId}`);
@@ -440,7 +442,7 @@ async function showRoute(originalId, startTracking = true, silent = false) {
         activeRouteId = Number(originalId);
         updateActiveListItem();
         const hideBtn = hideRouteBtn();
-        if (hideBtn) { hideBtn.disabled = false; }
+        if (hideBtn) hideBtn.disabled = false;
         if (!silent) setStatus(`Маршрут #${originalId} отображён`, 'info');
         if (startTracking) startRouteTracking(Number(originalId));
     } catch (e) {
@@ -480,66 +482,45 @@ function hideRoute() {
     setStatus('Маршрут скрыт', 'info');
 }
 
-// Удалён экспорт маршрутов в GeoJSON/GPX
-
-// Удаление объекта
 async function deleteObject(id) {
-    if (!confirm('Удалить этот объект?')) {
-        return;
-    }
-    
+    if (!confirm('Удалить этот объект?')) return;
     try {
         const response = await fetch('/api/objects/delete', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id })
         });
-        
-        if (response.ok) {
-            await loadObjects();
-        } else {
-            throw new Error('Ошибка удаления объекта');
-        }
+        if (!response.ok) throw new Error('Ошибка удаления объекта');
+        await refreshData();
     } catch (error) {
         console.error('Ошибка:', error);
         alert('Ошибка удаления объекта');
     }
 }
 
-// Модальное окно добавления объекта
 const modal = document.getElementById('add-marker-modal');
 const addMarkerBtn = document.getElementById('add-marker-btn');
 const closeBtn = document.querySelector('.close');
 const cancelBtn = document.querySelector('.cancel-btn');
 
-addMarkerBtn.addEventListener('click', () => {
-    modal.classList.remove('hidden');
-    // Установка текущего центра карты (в WGS-84)
-    const center = map.getCenter();
-    document.getElementById('marker-lat').value = center.lat.toFixed(6);
-    document.getElementById('marker-lng').value = center.lng.toFixed(6);
-});
+if (addMarkerBtn) {
+    addMarkerBtn.addEventListener('click', () => {
+        modal.classList.remove('hidden');
+        const center = map.getCenter();
+        document.getElementById('marker-lat').value = center.lat.toFixed(6);
+        document.getElementById('marker-lng').value = center.lng.toFixed(6);
+    });
+}
 
-closeBtn.addEventListener('click', () => {
-    modal.classList.add('hidden');
-});
-
-cancelBtn.addEventListener('click', () => {
-    modal.classList.add('hidden');
-});
+if (closeBtn) closeBtn.addEventListener('click', () => modal.classList.add('hidden'));
+if (cancelBtn) cancelBtn.addEventListener('click', () => modal.classList.add('hidden'));
 
 window.addEventListener('click', (e) => {
-    if (e.target === modal) {
-        modal.classList.add('hidden');
-    }
+    if (e.target === modal) modal.classList.add('hidden');
 });
 
-// Обработка формы добавления объекта
 document.getElementById('add-marker-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    
     const name = document.getElementById('marker-name').value;
     const frequency = document.getElementById('marker-description').value;
     const telemetry = document.getElementById('marker-telemetry').value;
@@ -548,41 +529,28 @@ document.getElementById('add-marker-form').addEventListener('submit', async (e) 
     const snailRaw = document.getElementById('marker-snail').value;
     const by_snail = snailRaw !== '' ? Number(snailRaw) : undefined;
     const datetime = new Date().toISOString();
-    
+
     try {
         const response = await fetch('/api/objects/create', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, frequency, telemetry, lat, lon, datetime, by_snail })
         });
-        
-        if (response.ok) {
-            modal.classList.add('hidden');
-            document.getElementById('add-marker-form').reset();
-            await loadObjects();
-        } else {
-            const data = await response.json();
-            alert(data.error || 'Ошибка добавления объекта');
-        }
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Ошибка добавления объекта');
+        modal.classList.add('hidden');
+        document.getElementById('add-marker-form').reset();
+        await refreshData();
     } catch (error) {
         console.error('Ошибка:', error);
         alert('Ошибка добавления объекта');
     }
 });
 
-// ===== Управление пользователями =====
-
-// Загрузка списка пользователей
 async function loadUsers() {
     try {
         const response = await fetch('/api/users');
-        
-        if (!response.ok) {
-            throw new Error('Ошибка загрузки пользователей');
-        }
-        
+        if (!response.ok) throw new Error('Ошибка загрузки пользователей');
         const users = await response.json();
         displayUsers(users);
     } catch (error) {
@@ -590,47 +558,39 @@ async function loadUsers() {
     }
 }
 
-// Отображение списка пользователей
 function displayUsers(users) {
     const usersList = document.getElementById('users-list');
     usersList.innerHTML = '';
-    
     if (users.length === 0) {
         usersList.innerHTML = '<p style="color: #999;">Нет пользователей</p>';
         return;
     }
-    
     users.forEach(user => {
         const userItem = document.createElement('div');
         userItem.className = 'user-item';
         userItem.innerHTML = `
             <span><strong>${user.role === 'admin' ? 'Администратор' : 'Оператор'}:</strong> ${user.username}</span>
-            <button class="delete-btn" onclick="deleteUser('${user.username}')">Удалить</button>
+            <button class="delete-btn" data-username="${user.username}">Удалить</button>
         `;
+        const delBtn = userItem.querySelector('.delete-btn');
+        delBtn.addEventListener('click', async () => await deleteUser(user.username));
         usersList.appendChild(userItem);
     });
 }
 
-// Удаление пользователя
 async function deleteUser(username) {
-    if (!confirm(`Удалить пользователя ${username}?`)) {
-        return;
-    }
-    
+    if (!confirm(`Удалить пользователя ${username}?`)) return;
     try {
         const response = await fetch('/api/users/delete', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username })
         });
-        
-        if (response.ok) {
-            await loadUsers();
-        } else {
+        if (!response.ok) {
             const data = await response.json();
             alert(data.error || 'Ошибка удаления пользователя');
+        } else {
+            await loadUsers();
         }
     } catch (error) {
         console.error('Ошибка:', error);
@@ -638,67 +598,178 @@ async function deleteUser(username) {
     }
 }
 
-// Модальное окно добавления пользователя
 const userModal = document.getElementById('add-user-modal');
 const addUserBtn = document.getElementById('add-user-btn');
 const closeUserBtn = document.querySelector('.close-user');
 const cancelUserBtn = document.querySelector('.cancel-user-btn');
 
-addUserBtn.addEventListener('click', () => {
-    userModal.classList.remove('hidden');
-});
-
-closeUserBtn.addEventListener('click', () => {
-    userModal.classList.add('hidden');
-});
-
-cancelUserBtn.addEventListener('click', () => {
-    userModal.classList.add('hidden');
-});
+if (addUserBtn) addUserBtn.addEventListener('click', () => userModal.classList.remove('hidden'));
+if (closeUserBtn) closeUserBtn.addEventListener('click', () => userModal.classList.add('hidden'));
+if (cancelUserBtn) cancelUserBtn.addEventListener('click', () => userModal.classList.add('hidden'));
 
 window.addEventListener('click', (e) => {
-    if (e.target === userModal) {
-        userModal.classList.add('hidden');
-    }
+    if (e.target === userModal) userModal.classList.add('hidden');
 });
 
-// Обработка формы добавления пользователя
 document.getElementById('add-user-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    
     const role = document.getElementById('user-role').value;
     const username = document.getElementById('user-username').value;
     const password = document.getElementById('user-password').value;
-    
+
     try {
         const response = await fetch('/api/users/create', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ role, username, password })
         });
-        
-        if (response.ok) {
-            userModal.classList.add('hidden');
-            document.getElementById('add-user-form').reset();
-            await loadUsers();
-        } else {
-            const data = await response.json();
-            alert(data.error || 'Ошибка создания пользователя');
-        }
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Ошибка создания пользователя');
+        userModal.classList.add('hidden');
+        document.getElementById('add-user-form').reset();
+        await loadUsers();
     } catch (error) {
         console.error('Ошибка:', error);
         alert('Ошибка создания пользователя');
     }
 });
 
-// Экспорт в Word
-document.getElementById('export-word-btn').addEventListener('click', async () => {
+document.getElementById('export-word-btn').addEventListener('click', () => {
+    window.location.href = '/api/export/word';
+});
+
+const updateModal = document.getElementById('update-marker-modal');
+const closeUpdateBtn = document.querySelector('.close-update');
+const cancelUpdateBtn = document.querySelector('.cancel-update-btn');
+
+if (closeUpdateBtn) closeUpdateBtn.addEventListener('click', () => hideUpdateModal());
+if (cancelUpdateBtn) cancelUpdateBtn.addEventListener('click', () => hideUpdateModal());
+window.addEventListener('click', (e) => {
+    if (e.target === updateModal) hideUpdateModal();
+});
+
+document.getElementById('update-marker-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = Number(document.getElementById('update-id').value);
+    const name = document.getElementById('update-name').value;
+    const frequency = document.getElementById('update-frequency').value;
+    const telemetry = document.getElementById('update-telemetry').value;
+    const lat = parseFloat(document.getElementById('update-lat').value);
+    const lon = parseFloat(document.getElementById('update-lng').value);
+    const snailRaw = document.getElementById('update-snail').value;
+    const by_snail = snailRaw !== '' ? Number(snailRaw) : undefined;
+    const datetime = new Date().toISOString();
+
     try {
-        window.location.href = '/api/export/word';
+        const response = await fetch('/api/objects/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, name, frequency, telemetry, lat, lon, datetime, by_snail })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Ошибка сохранения объекта');
+        hideUpdateModal();
+        await refreshData();
+        setStatus('Версия объекта сохранена', 'info');
     } catch (error) {
-        console.error('Ошибка экспорта:', error);
-        alert('Ошибка при экспорте данных');
+        console.error('Ошибка:', error);
+        alert('Ошибка сохранения объекта');
     }
 });
+
+function openUpdateModal(obj) {
+    document.getElementById('update-id').value = obj.id;
+    document.getElementById('update-name').value = obj.name || '';
+    document.getElementById('update-frequency').value = obj.frequency || '';
+    document.getElementById('update-telemetry').value = obj.telemetry || '';
+    document.getElementById('update-lat').value = obj.lat || '';
+    document.getElementById('update-lng').value = obj.lon || '';
+    document.getElementById('update-snail').value = obj.by_snail || '';
+    updateModal.classList.remove('hidden');
+}
+
+function hideUpdateModal() {
+    updateModal.classList.add('hidden');
+    document.getElementById('update-marker-form').reset();
+}
+
+function collectFilters() {
+    return {
+        name: document.getElementById('filter-name').value.trim(),
+        frequency: document.getElementById('filter-frequency').value.trim(),
+        date_from: document.getElementById('filter-from').value.trim(),
+        date_to: document.getElementById('filter-to').value.trim(),
+        post_id: document.getElementById('filter-post').value.trim(),
+        by_snail: document.getElementById('filter-snail').value.trim()
+    };
+}
+
+async function loadTable(filters = {}) {
+    try {
+        const params = new URLSearchParams();
+        Object.entries(filters).forEach(([key, value]) => {
+            if (value !== undefined && value !== null && String(value).trim() !== '') {
+                params.append(key, value);
+            }
+        });
+        const qs = params.toString();
+        const resp = await fetch(`/api/objects/filter${qs ? '?' + qs : ''}`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Ошибка фильтра');
+        renderTable(data);
+    } catch (error) {
+        console.error('Ошибка загрузки таблицы:', error);
+        const container = document.getElementById('objects-table');
+        if (container) container.innerHTML = '<div style="padding:8px; color:#c00;">Не удалось загрузить таблицу</div>';
+    }
+}
+
+function renderTable(data) {
+    const container = document.getElementById('objects-table');
+    if (!container) return;
+    if (!data || data.length === 0) {
+        container.innerHTML = '<div style="padding:8px; color:#777;">Нет данных</div>';
+        return;
+    }
+
+    const rows = data.map(obj => {
+        const status = obj.is_finished ? 'Завершено' : 'Активно';
+        return `
+            <tr data-original="${obj.original_id}">
+                <td>${obj.object_number || ''}</td>
+                <td>${obj.name || ''}</td>
+                <td>${obj.frequency || ''}</td>
+                <td>${obj.telemetry || ''}</td>
+                <td>${obj.by_snail || ''}</td>
+                <td>${obj.post_id || ''}</td>
+                <td>${status}</td>
+                <td>${obj.datetime ? new Date(obj.datetime).toLocaleString('ru-RU') : ''}</td>
+            </tr>
+        `;
+    }).join('');
+
+    container.innerHTML = `
+        <table>
+            <thead>
+                <tr>
+                    <th>№</th>
+                    <th>Название</th>
+                    <th>Частота</th>
+                    <th>Телеметрия</th>
+                    <th>Улитка</th>
+                    <th>Пост</th>
+                    <th>Статус</th>
+                    <th>Обновлено</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        </table>
+    `;
+
+    container.querySelectorAll('tbody tr').forEach(tr => {
+        tr.addEventListener('click', () => {
+            const orig = tr.getAttribute('data-original');
+            showRoute(orig, true, false);
+        });
+    });
+}

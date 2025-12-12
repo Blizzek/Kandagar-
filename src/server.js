@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '..', 'config', '.env') });
 const express = require('express');
 const session = require('express-session');
 const SQLiteStore = require('connect-sqlite3')(session);
@@ -214,7 +214,7 @@ db.serialize(() => {
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, '..', 'public')));
 // Базовая защита заголовков
 app.use(helmet());
 // Лимит запросов (смягчённый для разработки)
@@ -658,14 +658,75 @@ app.get('/api/objects', requireOperatorOrAdmin, (req, res) => {
         datetime: obj.datetime,
         name: obj.name,
         frequency: obj.frequency,
+        telemetry: obj.telemetry,
         x: obj.x, // СК-42 X (восток)
         y: obj.y, // СК-42 Y (север)
         lon: wgs ? wgs.lon : null, // WGS-84 долгота
         lat: wgs ? wgs.lat : null, // WGS-84 широта
-        by_snail: obj.by_snail
+        by_snail: obj.by_snail,
+        post_id: obj.post_id,
+        is_finished: obj.is_finished
       };
     });
     
+    res.json(result);
+  });
+});
+
+// Фильтр/табличное представление последних версий
+app.get('/api/objects/filter', requireOperatorOrAdmin, (req, res) => {
+  const { name, frequency, date_from, date_to, post_id, by_snail, sort = 'datetime', dir = 'desc' } = req.query;
+  const conditions = [];
+  const params = [];
+
+  if (name) { conditions.push('o.name LIKE ?'); params.push(`%${name}%`); }
+  if (frequency) { conditions.push('o.frequency LIKE ?'); params.push(`%${frequency}%`); }
+  if (post_id) { conditions.push('o.post_id = ?'); params.push(Number(post_id)); }
+  if (by_snail) { conditions.push('o.by_snail = ?'); params.push(String(by_snail)); }
+  if (date_from) { conditions.push('o.datetime >= ?'); params.push(date_from); }
+  if (date_to) { conditions.push('o.datetime <= ?'); params.push(date_to); }
+
+  const sortable = ['datetime', 'frequency', 'name', 'object_number', 'post_id'];
+  const safeSort = sortable.includes(sort) ? sort : 'datetime';
+  const safeDir = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const sql = `
+    SELECT o.* FROM objects o
+    JOIN (
+      SELECT original_id, MAX(datetime) as max_dt FROM objects GROUP BY original_id
+    ) last ON o.original_id = last.original_id AND o.datetime = last.max_dt
+    ${where}
+    ORDER BY o.${safeSort} ${safeDir}
+  `;
+
+  db.all(sql, params, (err, rows) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    const result = rows.map(obj => {
+      let wgs = null;
+      if (obj.x && obj.y) {
+        try { wgs = sk42ToWGS84(obj.x, obj.y); } catch (e) { console.error('Ошибка конвертации:', e); }
+      }
+      return {
+        id: obj.id,
+        original_id: obj.original_id || obj.id,
+        object_number: obj.object_number,
+        datetime: obj.datetime,
+        name: obj.name,
+        frequency: obj.frequency,
+        telemetry: obj.telemetry,
+        x: obj.x,
+        y: obj.y,
+        lon: wgs ? wgs.lon : null,
+        lat: wgs ? wgs.lat : null,
+        by_snail: obj.by_snail,
+        post_id: obj.post_id,
+        is_finished: obj.is_finished
+      };
+    });
     res.json(result);
   });
 });
@@ -1057,7 +1118,7 @@ function createTable(rows) {
 
 // Главная страница
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
 // Запуск сервера
