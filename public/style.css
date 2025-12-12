@@ -297,7 +297,6 @@ header h1 {
 .leaflet-popup-content-wrapper {
     border-radius: 8px;
 }
-
 .leaflet-popup-content h3 {
     margin: 0 0 10px 0;
     color: #333;
@@ -306,6 +305,47 @@ header h1 {
 .leaflet-popup-content p {
     margin: 5px 0;
     color: #666;
+}
+
+/* Панель управления пользователями */
+.admin-panel {
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 8px;
+}
+
+.admin-panel h2 {
+    font-size: 16px;
+    margin-bottom: 15px;
+    color: #333;
+}
+
+.users-list {
+    margin-top: 15px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.user-item {
+    background: white;
+    padding: 12px;
+    margin-bottom: 8px;
+    border-radius: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.user-item span {
+    font-size: 14px;
+    color: #333;
+}
+
+.user-item .delete-btn {
+    padding: 6px 12px;
+    font-size: 12px;
 }
 
 /* Адаптивность */

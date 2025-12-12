@@ -1,7 +1,8 @@
 // Глобальные переменные
 let map;
-let markers = [];
-let markerLayers = {};
+let objects = [];
+let objectLayers = {};
+let userRole = '';
 
 // Проверка авторизации при загрузке
 document.addEventListener('DOMContentLoaded', async () => {
@@ -10,7 +11,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const data = await response.json();
         
         if (data.authenticated) {
-            showMainInterface(data.username);
+            userRole = data.role;
+            showMainInterface(data.username, data.role);
         } else {
             showAuthForm();
         }
@@ -27,13 +29,26 @@ function showAuthForm() {
 }
 
 // Показать основной интерфейс
-function showMainInterface(username) {
+function showMainInterface(username, role) {
     document.getElementById('auth-container').classList.add('hidden');
     document.getElementById('main-container').classList.remove('hidden');
-    document.getElementById('username-display').textContent = `Пользователь: ${username}`;
+    
+    const roleNames = {
+        'creator': 'Создатель',
+        'admin': 'Администратор',
+        'operator': 'Оператор'
+    };
+    
+    document.getElementById('username-display').textContent = `${roleNames[role] || role}: ${username}`;
+    
+    // Показываем панель управления пользователями для Creator
+    if (role === 'creator') {
+        document.getElementById('admin-panel').classList.remove('hidden');
+        loadUsers();
+    }
     
     initMap();
-    loadMarkers();
+    loadObjects();
 }
 
 // Обработка формы входа
@@ -45,7 +60,8 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     const errorMessage = document.getElementById('error-message');
     
     try {
-        const response = await fetch('/api/login', {
+        // Пробуем войти как Creator
+        let response = await fetch('/api/creator-login', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -53,10 +69,28 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
             body: JSON.stringify({ username, password })
         });
         
-        const data = await response.json();
+        let data = await response.json();
         
-        if (response.ok) {
-            showMainInterface(data.username);
+        if (response.ok && data.status === 'ok') {
+            userRole = data.role;
+            showMainInterface(data.username, data.role);
+            return;
+        }
+        
+        // Если не Creator, пробуем Admin/Operator
+        response = await fetch('/api/user-login', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username, password })
+        });
+        
+        data = await response.json();
+        
+        if (response.ok && data.status === 'ok') {
+            userRole = data.role;
+            showMainInterface(data.username, data.role);
         } else {
             errorMessage.textContent = data.error || 'Ошибка авторизации';
         }
@@ -100,101 +134,120 @@ function initMap() {
     });
 }
 
-// Загрузка меток с сервера
-async function loadMarkers() {
+// Загрузка объектов с сервера
+async function loadObjects() {
     try {
-        const response = await fetch('/api/markers');
+        const response = await fetch('/api/objects');
         
         if (!response.ok) {
-            throw new Error('Ошибка загрузки меток');
+            throw new Error('Ошибка загрузки объектов');
         }
         
-        markers = await response.json();
-        displayMarkers();
+        objects = await response.json();
+        displayObjects();
     } catch (error) {
-        console.error('Ошибка загрузки меток:', error);
-        alert('Ошибка загрузки меток');
+        console.error('Ошибка загрузки объектов:', error);
+        alert('Ошибка загрузки объектов');
     }
 }
 
-// Отображение меток на карте и в списке
-function displayMarkers() {
+// Отображение объектов на карте и в списке
+function displayObjects() {
     // Очистка существующих маркеров на карте
-    Object.values(markerLayers).forEach(marker => map.removeLayer(marker));
-    markerLayers = {};
+    Object.values(objectLayers).forEach(marker => map.removeLayer(marker));
+    objectLayers = {};
     
     // Очистка списка
-    const markersList = document.getElementById('markers-list');
-    markersList.innerHTML = '';
+    const objectsList = document.getElementById('markers-list');
+    objectsList.innerHTML = '';
     
-    if (markers.length === 0) {
-        markersList.innerHTML = '<p style="color: #999; text-align: center;">Нет меток</p>';
+    if (objects.length === 0) {
+        objectsList.innerHTML = '<p style="color: #999; text-align: center;">Нет объектов</p>';
         return;
     }
     
-    // Добавление меток
-    markers.forEach(marker => {
-        // Добавление на карту
-        const mapMarker = L.marker([marker.latitude, marker.longitude])
-            .addTo(map)
-            .bindPopup(`
-                <h3>${marker.name}</h3>
-                <p>${marker.description || 'Без описания'}</p>
-                <p><small>Координаты: ${marker.latitude.toFixed(4)}, ${marker.longitude.toFixed(4)}</small></p>
-            `);
-        
-        markerLayers[marker.id] = mapMarker;
+    // Добавление объектов
+    objects.forEach(obj => {
+        // Добавление на карту (используем lon/lat из WGS-84)
+        if (obj.lat && obj.lon) {
+            const mapMarker = L.marker([obj.lat, obj.lon])
+                .addTo(map)
+                .bindPopup(`
+                    <h3>${obj.name || 'Объект ' + obj.object_number}</h3>
+                    <p>Номер: ${obj.object_number}</p>
+                    <p>Частота: ${obj.frequency || '-'}</p>
+                    <p>По улитке: ${obj.by_snail || '-'}</p>
+                    <p><small>СК-42: X=${obj.x}, Y=${obj.y}</small></p>
+                    <p><small>WGS-84: ${obj.lat.toFixed(6)}, ${obj.lon.toFixed(6)}</small></p>
+                `);
+            
+            objectLayers[obj.id] = mapMarker;
+        }
         
         // Добавление в список
-        const markerItem = document.createElement('div');
-        markerItem.className = 'marker-item';
-        markerItem.innerHTML = `
-            <h3>${marker.name}</h3>
-            <p>${marker.description || 'Без описания'}</p>
-            <p class="coords">Координаты: ${marker.latitude.toFixed(4)}, ${marker.longitude.toFixed(4)}</p>
-            <button class="delete-btn" onclick="deleteMarker(${marker.id})">Удалить</button>
+        const objectItem = document.createElement('div');
+        objectItem.className = 'marker-item';
+        
+        // Показываем кнопку удаления только для Creator и Admin
+        const deleteButton = (userRole === 'creator' || userRole === 'admin') 
+            ? `<button class="delete-btn" onclick="deleteObject(${obj.id})">Удалить</button>` 
+            : '';
+        
+        objectItem.innerHTML = `
+            <h3>${obj.name || 'Объект ' + obj.object_number}</h3>
+            <p>Номер: ${obj.object_number}</p>
+            <p>Частота: ${obj.frequency || '-'}</p>
+            <p class="coords">СК-42: X=${obj.x || '-'}, Y=${obj.y || '-'}</p>
+            ${deleteButton}
         `;
         
-        markerItem.addEventListener('click', (e) => {
-            if (!e.target.classList.contains('delete-btn')) {
-                map.setView([marker.latitude, marker.longitude], 12);
-                mapMarker.openPopup();
+        objectItem.addEventListener('click', (e) => {
+            if (!e.target.classList.contains('delete-btn') && obj.lat && obj.lon) {
+                map.setView([obj.lat, obj.lon], 12);
+                objectLayers[obj.id].openPopup();
             }
         });
         
-        markersList.appendChild(markerItem);
+        objectsList.appendChild(objectItem);
     });
     
-    // Центрирование карты на всех метках
-    if (markers.length > 0) {
-        const bounds = L.latLngBounds(markers.map(m => [m.latitude, m.longitude]));
-        map.fitBounds(bounds, { padding: [50, 50] });
+    // Центрирование карты на всех объектах
+    if (objects.length > 0) {
+        const validObjects = objects.filter(o => o.lat && o.lon);
+        if (validObjects.length > 0) {
+            const bounds = L.latLngBounds(validObjects.map(o => [o.lat, o.lon]));
+            map.fitBounds(bounds, { padding: [50, 50] });
+        }
     }
 }
 
-// Удаление метки
-async function deleteMarker(id) {
-    if (!confirm('Удалить эту метку?')) {
+// Удаление объекта
+async function deleteObject(id) {
+    if (!confirm('Удалить этот объект?')) {
         return;
     }
     
     try {
-        const response = await fetch(`/api/markers/${id}`, {
-            method: 'DELETE'
+        const response = await fetch('/api/objects/delete', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ id })
         });
         
         if (response.ok) {
-            await loadMarkers();
+            await loadObjects();
         } else {
-            throw new Error('Ошибка удаления метки');
+            throw new Error('Ошибка удаления объекта');
         }
     } catch (error) {
         console.error('Ошибка:', error);
-        alert('Ошибка удаления метки');
+        alert('Ошибка удаления объекта');
     }
 }
 
-// Модальное окно добавления метки
+// Модальное окно добавления объекта
 const modal = document.getElementById('add-marker-modal');
 const addMarkerBtn = document.getElementById('add-marker-btn');
 const closeBtn = document.querySelector('.close');
@@ -202,7 +255,7 @@ const cancelBtn = document.querySelector('.cancel-btn');
 
 addMarkerBtn.addEventListener('click', () => {
     modal.classList.remove('hidden');
-    // Установка текущего центра карты
+    // Установка текущего центра карты (в WGS-84)
     const center = map.getCenter();
     document.getElementById('marker-lat').value = center.lat.toFixed(6);
     document.getElementById('marker-lng').value = center.lng.toFixed(6);
@@ -222,34 +275,166 @@ window.addEventListener('click', (e) => {
     }
 });
 
-// Обработка формы добавления метки
+// Обработка формы добавления объекта
 document.getElementById('add-marker-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     
     const name = document.getElementById('marker-name').value;
-    const description = document.getElementById('marker-description').value;
-    const latitude = parseFloat(document.getElementById('marker-lat').value);
-    const longitude = parseFloat(document.getElementById('marker-lng').value);
+    const frequency = document.getElementById('marker-description').value;
+    const lat = parseFloat(document.getElementById('marker-lat').value);
+    const lon = parseFloat(document.getElementById('marker-lng').value);
+    const datetime = new Date().toISOString();
     
     try {
-        const response = await fetch('/api/markers', {
+        const response = await fetch('/api/objects/create', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ name, description, latitude, longitude })
+            body: JSON.stringify({ name, frequency, lat, lon, datetime })
         });
         
         if (response.ok) {
             modal.classList.add('hidden');
             document.getElementById('add-marker-form').reset();
-            await loadMarkers();
+            await loadObjects();
         } else {
             const data = await response.json();
-            alert(data.error || 'Ошибка добавления метки');
+            alert(data.error || 'Ошибка добавления объекта');
         }
     } catch (error) {
         console.error('Ошибка:', error);
-        alert('Ошибка добавления метки');
+        alert('Ошибка добавления объекта');
+    }
+});
+
+// ===== Управление пользователями =====
+
+// Загрузка списка пользователей
+async function loadUsers() {
+    try {
+        const response = await fetch('/api/users');
+        
+        if (!response.ok) {
+            throw new Error('Ошибка загрузки пользователей');
+        }
+        
+        const users = await response.json();
+        displayUsers(users);
+    } catch (error) {
+        console.error('Ошибка загрузки пользователей:', error);
+    }
+}
+
+// Отображение списка пользователей
+function displayUsers(users) {
+    const usersList = document.getElementById('users-list');
+    usersList.innerHTML = '';
+    
+    if (users.length === 0) {
+        usersList.innerHTML = '<p style="color: #999;">Нет пользователей</p>';
+        return;
+    }
+    
+    users.forEach(user => {
+        const userItem = document.createElement('div');
+        userItem.className = 'user-item';
+        userItem.innerHTML = `
+            <span><strong>${user.role === 'admin' ? 'Администратор' : 'Оператор'}:</strong> ${user.username}</span>
+            <button class="delete-btn" onclick="deleteUser('${user.username}')">Удалить</button>
+        `;
+        usersList.appendChild(userItem);
+    });
+}
+
+// Удаление пользователя
+async function deleteUser(username) {
+    if (!confirm(`Удалить пользователя ${username}?`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/users/delete', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username })
+        });
+        
+        if (response.ok) {
+            await loadUsers();
+        } else {
+            const data = await response.json();
+            alert(data.error || 'Ошибка удаления пользователя');
+        }
+    } catch (error) {
+        console.error('Ошибка:', error);
+        alert('Ошибка удаления пользователя');
+    }
+}
+
+// Модальное окно добавления пользователя
+const userModal = document.getElementById('add-user-modal');
+const addUserBtn = document.getElementById('add-user-btn');
+const closeUserBtn = document.querySelector('.close-user');
+const cancelUserBtn = document.querySelector('.cancel-user-btn');
+
+addUserBtn.addEventListener('click', () => {
+    userModal.classList.remove('hidden');
+});
+
+closeUserBtn.addEventListener('click', () => {
+    userModal.classList.add('hidden');
+});
+
+cancelUserBtn.addEventListener('click', () => {
+    userModal.classList.add('hidden');
+});
+
+window.addEventListener('click', (e) => {
+    if (e.target === userModal) {
+        userModal.classList.add('hidden');
+    }
+});
+
+// Обработка формы добавления пользователя
+document.getElementById('add-user-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const role = document.getElementById('user-role').value;
+    const username = document.getElementById('user-username').value;
+    const password = document.getElementById('user-password').value;
+    
+    try {
+        const response = await fetch('/api/users/create', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ role, username, password })
+        });
+        
+        if (response.ok) {
+            userModal.classList.add('hidden');
+            document.getElementById('add-user-form').reset();
+            await loadUsers();
+        } else {
+            const data = await response.json();
+            alert(data.error || 'Ошибка создания пользователя');
+        }
+    } catch (error) {
+        console.error('Ошибка:', error);
+        alert('Ошибка создания пользователя');
+    }
+});
+
+// Экспорт в Word
+document.getElementById('export-word-btn').addEventListener('click', async () => {
+    try {
+        window.location.href = '/api/export/word';
+    } catch (error) {
+        console.error('Ошибка экспорта:', error);
+        alert('Ошибка при экспорте данных');
     }
 });

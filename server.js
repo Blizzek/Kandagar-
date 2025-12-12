@@ -3,6 +3,7 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const { sk42ToWGS84, wgs84ToSK42 } = require('./coordinate-converter');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,54 +25,144 @@ const db = new sqlite3.Database('kandagar.db', (err) => {
 
 // Создание таблиц
 db.serialize(() => {
+  // Таблица создателей системы (Creator)
   db.run(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS creators (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
       password TEXT NOT NULL
     )
   `);
 
+  // Таблица администраторов (Admin)
   db.run(`
-    CREATE TABLE IF NOT EXISTS markers (
+    CREATE TABLE IF NOT EXISTS admins (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      description TEXT,
-      latitude REAL NOT NULL,
-      longitude REAL NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL
     )
   `);
 
-  // Создание тестового пользователя (admin/admin) если его нет
-  db.get('SELECT * FROM users WHERE username = ?', ['admin'], (err, row) => {
+  // Таблица операторов (Operator)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS operators (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL
+    )
+  `);
+
+  // Таблица объектов на карте с версионированием
+  db.run(`
+    CREATE TABLE IF NOT EXISTS objects (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      original_id INTEGER,
+      object_number TEXT NOT NULL,
+      datetime DATETIME,
+      name TEXT,
+      frequency TEXT,
+      x REAL,
+      y REAL,
+      by_snail TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (original_id) REFERENCES objects(id)
+    )
+  `);
+
+  // Таблица попыток входа (для блокировки по IP)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS login_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ip TEXT NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      last_attempt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      is_blocked INTEGER DEFAULT 0
+    )
+  `);
+
+  // Таблица журнала входов
+  db.run(`
+    CREATE TABLE IF NOT EXISTS login_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL,
+      ip TEXT NOT NULL,
+      success INTEGER DEFAULT 0,
+      role TEXT NOT NULL,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Создание Creator по умолчанию (creator/creator) если его нет
+  db.get('SELECT * FROM creators WHERE username = ?', ['creator'], (err, row) => {
     if (err) {
-      console.error('Ошибка при проверке пользователя:', err);
+      console.error('Ошибка при проверке creator:', err);
     } else if (!row) {
-      const hashedPassword = bcrypt.hashSync('admin', 10);
-      db.run('INSERT INTO users (username, password) VALUES (?, ?)', ['admin', hashedPassword], (err) => {
+      const hashedPassword = bcrypt.hashSync('creator', 10);
+      db.run('INSERT INTO creators (username, password) VALUES (?, ?)', ['creator', hashedPassword], (err) => {
         if (err) {
-          console.error('Ошибка при создании пользователя:', err);
+          console.error('Ошибка при создании creator:', err);
         } else {
-          console.log('Создан тестовый пользователь: admin/admin');
+          console.log('Создан тестовый создатель: creator/creator');
         }
       });
     }
   });
 
-  // Добавление тестовых меток если их нет
-  db.get('SELECT COUNT(*) as count FROM markers', (err, row) => {
+  // Создание тестового Admin (admin/admin) если его нет
+  db.get('SELECT * FROM admins WHERE username = ?', ['admin'], (err, row) => {
     if (err) {
-      console.error('Ошибка при подсчете меток:', err);
+      console.error('Ошибка при проверке admin:', err);
+    } else if (!row) {
+      const hashedPassword = bcrypt.hashSync('admin', 10);
+      db.run('INSERT INTO admins (username, password) VALUES (?, ?)', ['admin', hashedPassword], (err) => {
+        if (err) {
+          console.error('Ошибка при создании admin:', err);
+        } else {
+          console.log('Создан тестовый администратор: admin/admin');
+        }
+      });
+    }
+  });
+
+  // Создание тестового Operator (operator/operator) если его нет
+  db.get('SELECT * FROM operators WHERE username = ?', ['operator'], (err, row) => {
+    if (err) {
+      console.error('Ошибка при проверке operator:', err);
+    } else if (!row) {
+      const hashedPassword = bcrypt.hashSync('operator', 10);
+      db.run('INSERT INTO operators (username, password) VALUES (?, ?)', ['operator', hashedPassword], (err) => {
+        if (err) {
+          console.error('Ошибка при создании operator:', err);
+        } else {
+          console.log('Создан тестовый оператор: operator/operator');
+        }
+      });
+    }
+  });
+
+  // Добавление тестовых объектов если их нет
+  db.get('SELECT COUNT(*) as count FROM objects', (err, row) => {
+    if (err) {
+      console.error('Ошибка при подсчете объектов:', err);
     } else if (row.count === 0) {
-      db.run('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)', 
-        ['Точка 1', 'Тестовая метка 1', 55.7558, 37.6173]);
-      db.run('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)', 
-        ['Точка 2', 'Тестовая метка 2', 59.9343, 30.3351]);
-      db.run('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)', 
-        ['Точка 3', 'Тестовая метка 3', 56.8389, 60.6057], (err) => {
+      const now = new Date().toISOString();
+      db.run('INSERT INTO objects (object_number, datetime, name, frequency, x, y, by_snail, original_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
+        ['1', now, 'Объект 1', '150.5', 37500000, 6200000, 'Да', null], function(err) {
+          if (!err) {
+            db.run('UPDATE objects SET original_id = ? WHERE id = ?', [this.lastID, this.lastID]);
+          }
+        });
+      db.run('INSERT INTO objects (object_number, datetime, name, frequency, x, y, by_snail, original_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
+        ['2', now, 'Объект 2', '200.3', 37510000, 6210000, 'Нет', null], function(err) {
+          if (!err) {
+            db.run('UPDATE objects SET original_id = ? WHERE id = ?', [this.lastID, this.lastID]);
+          }
+        });
+      db.run('INSERT INTO objects (object_number, datetime, name, frequency, x, y, by_snail, original_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
+        ['3', now, 'Объект 3', '175.8', 37520000, 6220000, 'Да', null], function(err) {
         if (!err) {
-          console.log('Добавлены тестовые метки');
+          db.run('UPDATE objects SET original_id = ? WHERE id = ?', [this.lastID, this.lastID]);
+          console.log('Добавлены тестовые объекты');
         }
       });
     }
@@ -94,7 +185,99 @@ app.use(session({
   }
 }));
 
-// Проверка авторизации
+// Константы для блокировки
+const BLOCK_TIME_MS = 5 * 60 * 1000; // 5 минут
+const MAX_ATTEMPTS = 3;
+
+// Вспомогательные функции для IP блокировки
+function getClientIP(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  return forwarded ? forwarded.split(',')[0].trim() : req.ip;
+}
+
+function isIPBlocked(ip, callback) {
+  db.get('SELECT * FROM login_attempts WHERE ip = ?', [ip], (err, row) => {
+    if (err) {
+      console.error('Ошибка проверки IP:', err);
+      return callback(false);
+    }
+    if (!row) {
+      return callback(false);
+    }
+    
+    const lastAttempt = new Date(row.last_attempt);
+    const now = new Date();
+    const timeDiff = now - lastAttempt;
+    
+    if (row.is_blocked && timeDiff < BLOCK_TIME_MS) {
+      return callback(true);
+    }
+    
+    if (row.is_blocked && timeDiff >= BLOCK_TIME_MS) {
+      db.run('UPDATE login_attempts SET is_blocked = 0, attempts = 0 WHERE ip = ?', [ip]);
+      return callback(false);
+    }
+    
+    callback(false);
+  });
+}
+
+function registerFailedAttempt(ip) {
+  db.get('SELECT * FROM login_attempts WHERE ip = ?', [ip], (err, row) => {
+    if (err) {
+      console.error('Ошибка регистрации попытки:', err);
+      return;
+    }
+    
+    const now = new Date().toISOString();
+    
+    if (!row) {
+      db.run('INSERT INTO login_attempts (ip, attempts, last_attempt, is_blocked) VALUES (?, ?, ?, ?)',
+        [ip, 1, now, 0]);
+    } else {
+      const newAttempts = row.attempts + 1;
+      const isBlocked = newAttempts >= MAX_ATTEMPTS ? 1 : 0;
+      db.run('UPDATE login_attempts SET attempts = ?, last_attempt = ?, is_blocked = ? WHERE ip = ?',
+        [newAttempts, now, isBlocked, ip]);
+    }
+  });
+}
+
+function clearAttempts(ip) {
+  db.run('DELETE FROM login_attempts WHERE ip = ?', [ip]);
+}
+
+function logLogin(username, ip, success, role) {
+  const now = new Date().toISOString();
+  db.run('INSERT INTO login_logs (username, ip, success, role, timestamp) VALUES (?, ?, ?, ?, ?)',
+    [username, ip, success ? 1 : 0, role, now]);
+}
+
+// Проверка авторизации для разных ролей
+function requireCreator(req, res, next) {
+  if (req.session.role === 'creator') {
+    next();
+  } else {
+    res.status(403).json({ error: 'Требуется авторизация создателя' });
+  }
+}
+
+function requireAdmin(req, res, next) {
+  if (req.session.role === 'admin' || req.session.role === 'creator') {
+    next();
+  } else {
+    res.status(403).json({ error: 'Требуется авторизация администратора' });
+  }
+}
+
+function requireOperatorOrAdmin(req, res, next) {
+  if (req.session.role === 'operator' || req.session.role === 'admin' || req.session.role === 'creator') {
+    next();
+  } else {
+    res.status(401).json({ error: 'Требуется авторизация' });
+  }
+}
+
 function requireAuth(req, res, next) {
   if (req.session.userId) {
     next();
@@ -104,33 +287,102 @@ function requireAuth(req, res, next) {
 }
 
 // API endpoints
-// Авторизация
-app.post('/api/login', (req, res) => {
+// Логин Creator
+app.post('/api/creator-login', (req, res) => {
   const { username, password } = req.body;
+  const ip = getClientIP(req);
   
   if (!username || !password) {
     return res.status(400).json({ error: 'Введите логин и пароль' });
   }
 
-  db.get('SELECT * FROM users WHERE username = ?', [username], (err, user) => {
-    if (err) {
-      console.error('Ошибка БД:', err);
-      return res.status(500).json({ error: 'Ошибка сервера' });
+  isIPBlocked(ip, (blocked) => {
+    if (blocked) {
+      return res.status(403).json({ error: 'IP заблокирован, попробуйте позже' });
     }
 
-    if (!user) {
-      return res.status(401).json({ error: 'Неверный логин или пароль' });
+    db.get('SELECT * FROM creators WHERE username = ?', [username], (err, creator) => {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+
+      const isValid = creator && bcrypt.compareSync(password, creator.password);
+      logLogin(username, ip, isValid, 'creator');
+
+      if (!isValid) {
+        registerFailedAttempt(ip);
+        return res.status(401).json({ error: 'Неверный логин или пароль' });
+      }
+
+      clearAttempts(ip);
+      req.session.userId = creator.id;
+      req.session.username = creator.username;
+      req.session.role = 'creator';
+      res.json({ status: 'ok', role: 'creator', username: creator.username });
+    });
+  });
+});
+
+// Логин Admin/Operator
+app.post('/api/user-login', (req, res) => {
+  const { username, password } = req.body;
+  const ip = getClientIP(req);
+  
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Введите логин и пароль' });
+  }
+
+  isIPBlocked(ip, (blocked) => {
+    if (blocked) {
+      return res.status(403).json({ error: 'IP заблокирован, попробуйте позже' });
     }
 
-    const isValid = bcrypt.compareSync(password, user.password);
-    
-    if (!isValid) {
-      return res.status(401).json({ error: 'Неверный логин или пароль' });
-    }
+    // Сначала проверяем в таблице админов
+    db.get('SELECT * FROM admins WHERE username = ?', [username], (err, admin) => {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
 
-    req.session.userId = user.id;
-    req.session.username = user.username;
-    res.json({ success: true, username: user.username });
+      if (admin) {
+        const isValid = bcrypt.compareSync(password, admin.password);
+        logLogin(username, ip, isValid, 'admin');
+
+        if (!isValid) {
+          registerFailedAttempt(ip);
+          return res.status(401).json({ error: 'Неверный логин или пароль' });
+        }
+
+        clearAttempts(ip);
+        req.session.userId = admin.id;
+        req.session.username = admin.username;
+        req.session.role = 'admin';
+        return res.json({ status: 'ok', role: 'admin', username: admin.username });
+      }
+
+      // Если не нашли в админах, проверяем операторов
+      db.get('SELECT * FROM operators WHERE username = ?', [username], (err, operator) => {
+        if (err) {
+          console.error('Ошибка БД:', err);
+          return res.status(500).json({ error: 'Ошибка сервера' });
+        }
+
+        const isValid = operator && bcrypt.compareSync(password, operator.password);
+        logLogin(username, ip, isValid, 'operator');
+
+        if (!isValid) {
+          registerFailedAttempt(ip);
+          return res.status(401).json({ error: 'Неверный логин или пароль' });
+        }
+
+        clearAttempts(ip);
+        req.session.userId = operator.id;
+        req.session.username = operator.username;
+        req.session.role = 'operator';
+        res.json({ status: 'ok', role: 'operator', username: operator.username });
+      });
+    });
   });
 });
 
@@ -148,60 +400,485 @@ app.post('/api/logout', (req, res) => {
 // Проверка авторизации
 app.get('/api/check-auth', (req, res) => {
   if (req.session.userId) {
-    res.json({ authenticated: true, username: req.session.username });
+    res.json({ 
+      authenticated: true, 
+      username: req.session.username,
+      role: req.session.role 
+    });
   } else {
     res.json({ authenticated: false });
   }
 });
 
-// Получение меток
-app.get('/api/markers', requireAuth, (req, res) => {
-  db.all('SELECT * FROM markers ORDER BY created_at DESC', (err, markers) => {
-    if (err) {
-      console.error('Ошибка БД:', err);
-      return res.status(500).json({ error: 'Ошибка сервера' });
-    }
-    res.json(markers);
-  });
-});
-
-// Добавление метки
-app.post('/api/markers', requireAuth, (req, res) => {
-  const { name, description, latitude, longitude } = req.body;
+// Создание пользователей (только Creator)
+app.post('/api/users/create', requireCreator, (req, res) => {
+  const { role, username, password } = req.body;
   
-  if (!name || !latitude || !longitude) {
-    return res.status(400).json({ error: 'Укажите название, широту и долготу' });
+  if (!role || !username || !password) {
+    return res.status(400).json({ error: 'Укажите роль, логин и пароль' });
   }
 
-  db.run('INSERT INTO markers (name, description, latitude, longitude) VALUES (?, ?, ?, ?)',
-    [name, description || '', latitude, longitude],
-    function(err) {
+  const hashedPassword = bcrypt.hashSync(password, 10);
+  
+  if (role === 'admin') {
+    db.get('SELECT * FROM admins WHERE username = ?', [username], (err, existing) => {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+      if (existing) {
+        return res.status(400).json({ error: 'Админ с таким логином уже существует' });
+      }
+      
+      db.run('INSERT INTO admins (username, password) VALUES (?, ?)', 
+        [username, hashedPassword], (err) => {
+        if (err) {
+          console.error('Ошибка БД:', err);
+          return res.status(500).json({ error: 'Ошибка при создании администратора' });
+        }
+        res.json({ status: 'ok' });
+      });
+    });
+  } else if (role === 'operator') {
+    db.get('SELECT * FROM operators WHERE username = ?', [username], (err, existing) => {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+      if (existing) {
+        return res.status(400).json({ error: 'Оператор с таким логином уже существует' });
+      }
+      
+      db.run('INSERT INTO operators (username, password) VALUES (?, ?)', 
+        [username, hashedPassword], (err) => {
+        if (err) {
+          console.error('Ошибка БД:', err);
+          return res.status(500).json({ error: 'Ошибка при создании оператора' });
+        }
+        res.json({ status: 'ok' });
+      });
+    });
+  } else {
+    res.status(400).json({ error: 'Неверный тип пользователя' });
+  }
+});
+
+// Удаление пользователя (Creator и Admin могут удалять операторов, только Creator - админов)
+app.post('/api/users/delete', (req, res) => {
+  const { username } = req.body;
+  
+  if (!username) {
+    return res.status(400).json({ error: 'Не указан username' });
+  }
+
+  // Creator может удалять всех
+  if (req.session.role === 'creator') {
+    db.get('SELECT * FROM admins WHERE username = ?', [username], (err, admin) => {
       if (err) {
         console.error('Ошибка БД:', err);
         return res.status(500).json({ error: 'Ошибка сервера' });
       }
       
-      db.get('SELECT * FROM markers WHERE id = ?', [this.lastID], (err, marker) => {
-        if (err) {
-          console.error('Ошибка БД:', err);
-          return res.status(500).json({ error: 'Ошибка сервера' });
-        }
-        res.json(marker);
-      });
+      if (admin) {
+        db.run('DELETE FROM admins WHERE username = ?', [username], (err) => {
+          if (err) {
+            console.error('Ошибка БД:', err);
+            return res.status(500).json({ error: 'Ошибка сервера' });
+          }
+          return res.json({ status: 'ok' });
+        });
+      } else {
+        db.run('DELETE FROM operators WHERE username = ?', [username], (err) => {
+          if (err) {
+            console.error('Ошибка БД:', err);
+            return res.status(500).json({ error: 'Ошибка сервера' });
+          }
+          res.json({ status: 'ok' });
+        });
+      }
     });
+  } 
+  // Admin может удалять только операторов
+  else if (req.session.role === 'admin') {
+    db.run('DELETE FROM operators WHERE username = ?', [username], (err) => {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+      res.json({ status: 'ok' });
+    });
+  } else {
+    res.status(403).json({ error: 'Недостаточно прав' });
+  }
 });
 
-// Удаление метки
-app.delete('/api/markers/:id', requireAuth, (req, res) => {
-  const { id } = req.params;
-  db.run('DELETE FROM markers WHERE id = ?', [id], (err) => {
+// Список пользователей
+app.get('/api/users', requireCreator, (req, res) => {
+  const users = [];
+  
+  db.all('SELECT id, username FROM admins', (err, admins) => {
     if (err) {
       console.error('Ошибка БД:', err);
       return res.status(500).json({ error: 'Ошибка сервера' });
     }
-    res.json({ success: true });
+    
+    admins.forEach(a => users.push({ role: 'admin', username: a.username }));
+    
+    db.all('SELECT id, username FROM operators', (err, operators) => {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+      
+      operators.forEach(o => users.push({ role: 'operator', username: o.username }));
+      res.json(users);
+    });
   });
 });
+
+// Получение объектов (возвращаем только последние версии)
+app.get('/api/objects', requireOperatorOrAdmin, (req, res) => {
+  db.all('SELECT * FROM objects ORDER BY original_id, datetime', (err, allObjects) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    
+    // Группируем по original_id и берем последние версии
+    const lastByOriginal = {};
+    allObjects.forEach(obj => {
+      const origId = obj.original_id || obj.id;
+      lastByOriginal[origId] = obj;
+    });
+    
+    const result = Object.values(lastByOriginal).map(obj => {
+      // Конвертируем СК-42 в WGS-84 для отображения на карте
+      let wgs = null;
+      if (obj.x && obj.y) {
+        try {
+          wgs = sk42ToWGS84(obj.x, obj.y);
+        } catch (e) {
+          console.error('Ошибка конвертации координат:', e);
+        }
+      }
+      
+      return {
+        id: obj.id,
+        original_id: obj.original_id || obj.id,
+        object_number: obj.object_number,
+        datetime: obj.datetime,
+        name: obj.name,
+        frequency: obj.frequency,
+        x: obj.x, // СК-42 X (восток)
+        y: obj.y, // СК-42 Y (север)
+        lon: wgs ? wgs.lon : null, // WGS-84 долгота
+        lat: wgs ? wgs.lat : null, // WGS-84 широта
+        by_snail: obj.by_snail
+      };
+    });
+    
+    res.json(result);
+  });
+});
+
+// Получение маршрута объекта (все версии по original_id)
+app.get('/api/object-route/:original_id', requireOperatorOrAdmin, (req, res) => {
+  const { original_id } = req.params;
+  
+  db.all('SELECT * FROM objects WHERE original_id = ? OR id = ? ORDER BY datetime', 
+    [original_id, original_id], (err, points) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    
+    if (!points || points.length === 0) {
+      return res.status(404).json({ error: 'Объект не найден' });
+    }
+    
+    const route = points.map(p => {
+      // Конвертируем СК-42 в WGS-84 для каждой точки маршрута
+      let wgs = null;
+      if (p.x && p.y) {
+        try {
+          wgs = sk42ToWGS84(p.x, p.y);
+        } catch (e) {
+          console.error('Ошибка конвертации координат:', e);
+        }
+      }
+      
+      return {
+        id: p.id,
+        datetime: p.datetime,
+        x: p.x,
+        y: p.y,
+        lon: wgs ? wgs.lon : null,
+        lat: wgs ? wgs.lat : null,
+        frequency: p.frequency,
+        name: p.name
+      };
+    });
+    
+    res.json({ status: 'ok', route });
+  });
+});
+
+// Получение следующего номера объекта
+app.get('/api/objects/next-number', requireOperatorOrAdmin, (req, res) => {
+  db.get('SELECT MAX(CAST(object_number AS INTEGER)) as max_num FROM objects', (err, row) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    
+    const nextNumber = (row && row.max_num ? row.max_num : 0) + 1;
+    res.json({ next_number: nextNumber });
+  });
+});
+
+// Создание/редактирование объекта (с версионированием)
+app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
+  const { id, object_number, datetime, name, frequency, lon, lat, by_snail } = req.body;
+  
+  if (!datetime || (lon === undefined) || (lat === undefined)) {
+    return res.status(400).json({ error: 'Укажите дату и координаты (lon, lat)' });
+  }
+
+  // Конвертируем WGS-84 в СК-42 для хранения
+  let sk42;
+  try {
+    sk42 = wgs84ToSK42(parseFloat(lon), parseFloat(lat));
+  } catch (e) {
+    console.error('Ошибка конвертации координат:', e);
+    return res.status(400).json({ error: 'Неверные координаты' });
+  }
+
+  // Если передан ID - это редактирование, создаем новую версию
+  if (id) {
+    db.get('SELECT * FROM objects WHERE id = ?', [id], (err, oldObj) => {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+      
+      if (!oldObj) {
+        return res.status(404).json({ error: 'Объект не найден' });
+      }
+
+      const origId = oldObj.original_id || oldObj.id;
+      const now = new Date().toISOString();
+      
+      db.run(`INSERT INTO objects (original_id, object_number, datetime, name, frequency, x, y, by_snail, created_at) 
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [origId, oldObj.object_number, datetime, name || oldObj.name, frequency || oldObj.frequency, 
+         sk42.x, sk42.y, by_snail || oldObj.by_snail, now],
+        function(err) {
+          if (err) {
+            console.error('Ошибка БД:', err);
+            return res.status(500).json({ error: 'Ошибка при создании версии' });
+          }
+          
+          res.json({ status: 'ok', new_id: this.lastID });
+        });
+    });
+  } else {
+    // Создание нового объекта
+    const now = new Date().toISOString();
+    
+    // Определяем номер объекта
+    let objNumber = object_number;
+    if (!objNumber) {
+      db.get('SELECT MAX(CAST(object_number AS INTEGER)) as max_num FROM objects', (err, row) => {
+        if (err) {
+          console.error('Ошибка БД:', err);
+          return res.status(500).json({ error: 'Ошибка сервера' });
+        }
+        
+        objNumber = String((row && row.max_num ? row.max_num : 0) + 1);
+        createNewObject();
+      });
+      return;
+    }
+    
+    createNewObject();
+    
+    function createNewObject() {
+      db.run(`INSERT INTO objects (object_number, datetime, name, frequency, x, y, by_snail, created_at) 
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [objNumber, datetime, name || '', frequency || '', sk42.x, sk42.y, by_snail || '', now],
+        function(err) {
+          if (err) {
+            console.error('Ошибка БД:', err);
+            return res.status(500).json({ error: 'Ошибка при создании объекта' });
+          }
+          
+          const newId = this.lastID;
+          
+          // Устанавливаем original_id = id для нового объекта
+          db.run('UPDATE objects SET original_id = ? WHERE id = ?', [newId, newId], (err) => {
+            if (err) {
+              console.error('Ошибка БД:', err);
+            }
+            res.json({ status: 'ok', id: newId });
+          });
+        });
+    }
+  }
+});
+
+// Удаление объекта (удаляет конкретную версию по id)
+app.post('/api/objects/delete', requireOperatorOrAdmin, (req, res) => {
+  const { id } = req.body;
+  
+  if (!id) {
+    return res.status(400).json({ error: 'Не указан ID объекта' });
+  }
+
+  db.get('SELECT * FROM objects WHERE id = ?', [id], (err, obj) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    
+    if (!obj) {
+      return res.status(404).json({ error: 'Объект не найден' });
+    }
+
+    db.run('DELETE FROM objects WHERE id = ?', [id], (err) => {
+      if (err) {
+        console.error('Ошибка БД:', err);
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+      res.json({ status: 'ok' });
+    });
+  });
+});
+
+// Экспорт всех объектов в Word (.docx)
+app.get('/api/export/word', requireOperatorOrAdmin, (req, res) => {
+  const { Document, Packer, Paragraph, Table, TableRow, TableCell, WidthType, TextRun } = require('docx');
+  
+  db.all('SELECT * FROM objects ORDER BY original_id, datetime', (err, objects) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    const doc = new Document({
+      sections: [{
+        children: [
+          new Paragraph({
+            children: [
+              new TextRun({
+                text: 'Выгрузка объектов БПЛА',
+                bold: true,
+                size: 32
+              })
+            ]
+          }),
+          new Paragraph({
+            children: [
+              new TextRun({
+                text: `Дата выгрузки: ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })} МСК`,
+                size: 24
+              })
+            ]
+          }),
+          new Paragraph({ text: '' }),
+          ...generateObjectsTables(objects)
+        ]
+      }]
+    });
+
+    Packer.toBuffer(doc).then(buffer => {
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      res.setHeader('Content-Disposition', `attachment; filename=export_objects_${Date.now()}.docx`);
+      res.send(buffer);
+    }).catch(error => {
+      console.error('Ошибка создания документа:', error);
+      res.status(500).json({ error: 'Ошибка создания документа' });
+    });
+  });
+});
+
+// Вспомогательная функция для генерации таблиц объектов
+function generateObjectsTables(objects) {
+  const { Paragraph, Table, TableRow, TableCell, WidthType, TextRun } = require('docx');
+  const elements = [];
+  
+  if (objects.length === 0) {
+    elements.push(new Paragraph({ text: 'Нет объектов для выгрузки' }));
+    return elements;
+  }
+
+  let currentOriginal = null;
+  let rows = [];
+
+  objects.forEach((obj, index) => {
+    const origId = obj.original_id || obj.id;
+    
+    if (origId !== currentOriginal) {
+      // Если есть накопленная таблица - добавляем
+      if (rows.length > 0) {
+        elements.push(createTable(rows));
+        elements.push(new Paragraph({ text: '' }));
+      }
+      
+      // Новый объект - заголовок
+      elements.push(new Paragraph({
+        children: [
+          new TextRun({
+            text: `Объект #${origId}`,
+            bold: true,
+            size: 28
+          })
+        ]
+      }));
+      
+      currentOriginal = origId;
+      rows = [];
+      
+      // Заголовок таблицы
+      rows.push(new TableRow({
+        children: [
+          new TableCell({ children: [new Paragraph({ text: 'ID версии' })] }),
+          new TableCell({ children: [new Paragraph({ text: 'Дата/Время' })] }),
+          new TableCell({ children: [new Paragraph({ text: 'Название' })] }),
+          new TableCell({ children: [new Paragraph({ text: 'Частота' })] }),
+          new TableCell({ children: [new Paragraph({ text: 'СК-42 (X, Y)' })] }),
+          new TableCell({ children: [new Paragraph({ text: 'По улитке' })] })
+        ]
+      }));
+    }
+    
+    // Добавляем строку данных
+    rows.push(new TableRow({
+      children: [
+        new TableCell({ children: [new Paragraph({ text: String(obj.id) })] }),
+        new TableCell({ children: [new Paragraph({ text: obj.datetime || '' })] }),
+        new TableCell({ children: [new Paragraph({ text: obj.name || '' })] }),
+        new TableCell({ children: [new Paragraph({ text: String(obj.frequency || '') })] }),
+        new TableCell({ children: [new Paragraph({ text: `X=${obj.x}, Y=${obj.y}` })] }),
+        new TableCell({ children: [new Paragraph({ text: obj.by_snail || '' })] })
+      ]
+    }));
+    
+    // Последний объект
+    if (index === objects.length - 1 && rows.length > 0) {
+      elements.push(createTable(rows));
+    }
+  });
+
+  return elements;
+}
+
+function createTable(rows) {
+  const { Table, WidthType } = require('docx');
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: rows
+  });
+}
 
 // Главная страница
 app.get('/', (req, res) => {

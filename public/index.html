@@ -25,7 +25,10 @@
                 <button type="submit" class="btn btn-primary">Войти</button>
             </form>
             <div class="help-text">
-                Тестовый доступ: admin / admin
+                Тестовые аккаунты:<br>
+                Creator: creator / creator<br>
+                Admin: admin / admin<br>
+                Operator: operator / operator
             </div>
         </div>
     </div>
@@ -44,8 +47,16 @@
 
         <div class="container">
             <div class="sidebar">
-                <h2>Метки на карте</h2>
-                <button id="add-marker-btn" class="btn btn-primary">+ Добавить метку</button>
+                <div id="admin-panel" class="admin-panel hidden">
+                    <h2>Управление пользователями</h2>
+                    <button id="add-user-btn" class="btn btn-primary">+ Добавить пользователя</button>
+                    <div id="users-list" class="users-list"></div>
+                    <hr style="margin: 20px 0;">
+                </div>
+                
+                <h2>Объекты на карте</h2>
+                <button id="add-marker-btn" class="btn btn-primary">+ Добавить объект</button>
+                <button id="export-word-btn" class="btn btn-secondary" style="margin-top: 10px;">📄 Экспорт в Word</button>
                 <div id="markers-list" class="markers-list"></div>
             </div>
 
@@ -55,31 +66,60 @@
         </div>
     </div>
 
-    <!-- Модальное окно добавления метки -->
+    <!-- Модальное окно добавления объекта -->
     <div id="add-marker-modal" class="modal hidden">
         <div class="modal-content">
             <span class="close">&times;</span>
-            <h2>Добавить метку</h2>
+            <h2>Добавить объект</h2>
             <form id="add-marker-form">
                 <div class="form-group">
                     <label for="marker-name">Название:</label>
                     <input type="text" id="marker-name" required>
                 </div>
                 <div class="form-group">
-                    <label for="marker-description">Описание:</label>
-                    <textarea id="marker-description" rows="3"></textarea>
+                    <label for="marker-description">Частота:</label>
+                    <input type="text" id="marker-description" placeholder="150.5">
                 </div>
                 <div class="form-group">
-                    <label for="marker-lat">Широта:</label>
-                    <input type="number" id="marker-lat" step="0.0001" required>
+                    <label for="marker-lat">Широта (Latitude):</label>
+                    <input type="number" id="marker-lat" step="0.000001" required>
                 </div>
                 <div class="form-group">
-                    <label for="marker-lng">Долгота:</label>
-                    <input type="number" id="marker-lng" step="0.0001" required>
+                    <label for="marker-lng">Долгота (Longitude):</label>
+                    <input type="number" id="marker-lng" step="0.000001" required>
                 </div>
                 <div class="form-actions">
                     <button type="submit" class="btn btn-primary">Добавить</button>
                     <button type="button" class="btn btn-secondary cancel-btn">Отмена</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно добавления пользователя -->
+    <div id="add-user-modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close-user">&times;</span>
+            <h2>Добавить пользователя</h2>
+            <form id="add-user-form">
+                <div class="form-group">
+                    <label for="user-role">Роль:</label>
+                    <select id="user-role" required>
+                        <option value="admin">Администратор</option>
+                        <option value="operator">Оператор</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="user-username">Логин:</label>
+                    <input type="text" id="user-username" required>
+                </div>
+                <div class="form-group">
+                    <label for="user-password">Пароль:</label>
+                    <input type="password" id="user-password" required>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">Создать</button>
+                    <button type="button" class="btn btn-secondary cancel-user-btn">Отмена</button>
                 </div>
             </form>
         </div>
