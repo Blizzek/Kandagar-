@@ -1,25 +1,52 @@
+require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
+const SQLiteStore = require('connect-sqlite3')(session);
 const bcrypt = require('bcryptjs');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const pino = require('pino');
+const pinoHttp = require('pino-http');
+const { z } = require('zod');
 const { sk42ToWGS84, wgs84ToSK42 } = require('./coordinate-converter');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+const SESSION_SECRET = process.env.SESSION_SECRET || 'kandagar-secret-key-change-in-production';
+const SESSION_STORE = (process.env.SESSION_STORE || 'sqlite').toLowerCase();
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+const CLIENT_MODE = (process.env.CLIENT_MODE || 'false').toLowerCase() === 'true';
+const GLOBAL_POST_ID = process.env.POST_ID ? Number(process.env.POST_ID) : null;
 
 // ПРИМЕЧАНИЕ: Для продакшена рекомендуется добавить:
 // - Rate limiting (например, express-rate-limit)
 // - CSRF защиту (например, csurf)
 // - Helmet для HTTP заголовков безопасности
-// - HTTPS/SSL сертификаты
+// - HTTPS/SSL сертификаты 
+
+// Определение пути к базе данных: приоритет --db=, затем ENV DB_PATH, затем значение по умолчанию
+function resolveDbPath() {
+  const arg = (process.argv || []).find(a => typeof a === 'string' && a.startsWith('--db='));
+  if (arg) {
+    const p = arg.slice(5).trim();
+    if (p) return p;
+  }
+  if (process.env.DB_PATH && process.env.DB_PATH.trim()) {
+    return process.env.DB_PATH.trim();
+  }
+  return 'kandagar.db';
+}
+
+const DB_PATH = resolveDbPath();
 
 // Инициализация базы данных
-const db = new sqlite3.Database('kandagar.db', (err) => {
+const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
     console.error('Ошибка подключения к БД:', err);
   } else {
-    console.log('Подключено к БД');
+    console.log(`Подключено к БД: ${DB_PATH}`);
   }
 });
 
@@ -61,11 +88,26 @@ db.serialize(() => {
       datetime DATETIME,
       name TEXT,
       frequency TEXT,
+      telemetry TEXT,
       x REAL,
       y REAL,
       by_snail TEXT,
+      post_id INTEGER,
+      is_finished INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (original_id) REFERENCES objects(id)
+    )
+  `);
+
+  // Пытаемся добавить колонку is_finished, если её ещё нет
+  db.run('ALTER TABLE objects ADD COLUMN is_finished INTEGER DEFAULT 0', (err) => {});
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS posts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      number INTEGER UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -173,10 +215,19 @@ db.serialize(() => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
+// Базовая защита заголовков
+app.use(helmet());
+// Лимит запросов (смягчённый для разработки)
+const limiter = rateLimit({ windowMs: 60 * 1000, max: process.env.NODE_ENV === 'production' ? 100 : 500 });
+app.use(limiter);
+// За доверенным прокси выставлять secure cookie
+app.set('trust proxy', 1);
+app.use(pinoHttp({ logger }));
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'kandagar-secret-key-change-in-production',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
+  store: SESSION_STORE === 'sqlite' ? new SQLiteStore({ db: 'sessions.sqlite', dir: './' }) : undefined,
   cookie: { 
     maxAge: 24 * 60 * 60 * 1000, // 24 часа
     secure: process.env.NODE_ENV === 'production', // HTTPS в продакшене
@@ -286,10 +337,44 @@ function requireAuth(req, res, next) {
   }
 }
 
+// Схемы валидации
+const credsSchema = z.object({ username: z.string().min(1), password: z.string().min(1) });
+const createUserSchema = z.object({ role: z.enum(['admin', 'operator']), username: z.string().min(1), password: z.string().min(1) });
+const deleteUserSchema = z.object({ username: z.string().min(1) });
+const moveSchema = z.object({
+  id: z.number().int().positive().optional(),
+  original_id: z.number().int().positive().optional(),
+  lon: z.union([z.string(), z.number()]).transform(Number),
+  lat: z.union([z.string(), z.number()]).transform(Number),
+  datetime: z.string().optional(),
+  name: z.string().optional(),
+  frequency: z.string().optional(),
+  by_snail: z.string().optional()
+}).refine(data => data.id || data.original_id, { message: 'Укажите id или original_id' });
+const objectCreateSchema = z.object({
+  id: z.number().int().positive().optional(),
+  object_number: z.string().optional(),
+  datetime: z.string().optional(),
+  name: z.string().optional(),
+  frequency: z.string().optional(),
+  lon: z.union([z.string(), z.number()]).transform(Number).optional(),
+  lat: z.union([z.string(), z.number()]).transform(Number).optional(),
+  by_snail: z.union([z.string(), z.number()]).optional(),
+  telemetry: z.string().optional()
+});
+
 // API endpoints
+// Конфиг для фронтенда
+app.get('/api/config', (req, res) => {
+  res.json({ clientMode: CLIENT_MODE, postId: GLOBAL_POST_ID });
+});
 // Логин Creator
 app.post('/api/creator-login', (req, res) => {
-  const { username, password } = req.body;
+  const parsed = credsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Введите логин и пароль' });
+  }
+  const { username, password } = parsed.data;
   const ip = getClientIP(req);
   
   if (!username || !password) {
@@ -326,7 +411,11 @@ app.post('/api/creator-login', (req, res) => {
 
 // Логин Admin/Operator
 app.post('/api/user-login', (req, res) => {
-  const { username, password } = req.body;
+  const parsed = credsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Введите логин и пароль' });
+  }
+  const { username, password } = parsed.data;
   const ip = getClientIP(req);
   
   if (!username || !password) {
@@ -412,11 +501,11 @@ app.get('/api/check-auth', (req, res) => {
 
 // Создание пользователей (только Creator)
 app.post('/api/users/create', requireCreator, (req, res) => {
-  const { role, username, password } = req.body;
-  
-  if (!role || !username || !password) {
+  const parsed = createUserSchema.safeParse(req.body);
+  if (!parsed.success) {
     return res.status(400).json({ error: 'Укажите роль, логин и пароль' });
   }
+  const { role, username, password } = parsed.data;
 
   const hashedPassword = bcrypt.hashSync(password, 10);
   
@@ -465,11 +554,11 @@ app.post('/api/users/create', requireCreator, (req, res) => {
 
 // Удаление пользователя (Creator и Admin могут удалять операторов, только Creator - админов)
 app.post('/api/users/delete', (req, res) => {
-  const { username } = req.body;
-  
-  if (!username) {
+  const parsed = deleteUserSchema.safeParse(req.body);
+  if (!parsed.success) {
     return res.status(400).json({ error: 'Не указан username' });
   }
+  const { username } = parsed.data;
 
   // Creator может удалять всех
   if (req.session.role === 'creator') {
@@ -623,6 +712,10 @@ app.get('/api/object-route/:original_id', requireOperatorOrAdmin, (req, res) => 
   });
 });
 
+// Экспорт маршрута в GeoJSON
+
+// Экспорт маршрута в GPX
+
 // Получение следующего номера объекта
 app.get('/api/objects/next-number', requireOperatorOrAdmin, (req, res) => {
   db.get('SELECT MAX(CAST(object_number AS INTEGER)) as max_num FROM objects', (err, row) => {
@@ -638,10 +731,14 @@ app.get('/api/objects/next-number', requireOperatorOrAdmin, (req, res) => {
 
 // Создание/редактирование объекта (с версионированием)
 app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
-  const { id, object_number, datetime, name, frequency, lon, lat, by_snail } = req.body;
+  const parsed = objectCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Укажите корректные данные' });
+  }
+  const { id, object_number, datetime, name, frequency, lon, lat, by_snail, telemetry } = parsed.data;
   
-  if (!datetime || (lon === undefined) || (lat === undefined)) {
-    return res.status(400).json({ error: 'Укажите дату и координаты (lon, lat)' });
+  if ((lon === undefined) || (lat === undefined)) {
+    return res.status(400).json({ error: 'Укажите координаты (lon, lat)' });
   }
 
   // Конвертируем WGS-84 в СК-42 для хранения
@@ -668,10 +765,11 @@ app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
       const origId = oldObj.original_id || oldObj.id;
       const now = new Date().toISOString();
       
-      db.run(`INSERT INTO objects (original_id, object_number, datetime, name, frequency, x, y, by_snail, created_at) 
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      const snail = (by_snail !== undefined && by_snail !== null && by_snail !== '') ? String(by_snail) : (oldObj.by_snail || '9');
+      db.run(`INSERT INTO objects (original_id, object_number, datetime, name, frequency, telemetry, x, y, by_snail, post_id, created_at) 
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [origId, oldObj.object_number, datetime, name || oldObj.name, frequency || oldObj.frequency, 
-         sk42.x, sk42.y, by_snail || oldObj.by_snail, now],
+         telemetry || oldObj.telemetry || '', sk42.x, sk42.y, snail, GLOBAL_POST_ID, now],
         function(err) {
           if (err) {
             console.error('Ошибка БД:', err);
@@ -703,9 +801,10 @@ app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
     createNewObject();
     
     function createNewObject() {
-      db.run(`INSERT INTO objects (object_number, datetime, name, frequency, x, y, by_snail, created_at) 
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [objNumber, datetime, name || '', frequency || '', sk42.x, sk42.y, by_snail || '', now],
+      const snail = (by_snail !== undefined && by_snail !== null && by_snail !== '') ? String(by_snail) : '9';
+      db.run(`INSERT INTO objects (object_number, datetime, name, frequency, telemetry, x, y, by_snail, post_id, created_at) 
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [objNumber, datetime, name || '', frequency || '', telemetry || '', sk42.x, sk42.y, snail, GLOBAL_POST_ID, now],
         function(err) {
           if (err) {
             console.error('Ошибка БД:', err);
@@ -724,6 +823,82 @@ app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
         });
     }
   }
+});
+
+// Перемещение объекта (создание новой версии по id/ original_id)
+app.post('/api/objects/move', requireOperatorOrAdmin, (req, res) => {
+  const parsed = moveSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Укажите данные' });
+  }
+  const { id, original_id, lon, lat, datetime, name, frequency, by_snail } = parsed.data;
+
+  // Конвертация координат
+  let sk42;
+  try {
+    sk42 = wgs84ToSK42(parseFloat(lon), parseFloat(lat));
+  } catch (e) {
+    console.error('Ошибка конвертации координат:', e);
+    return res.status(400).json({ error: 'Неверные координаты' });
+  }
+
+  const when = datetime || new Date().toISOString();
+
+  // Ищем базовую версию по id или original_id
+  const findSql = original_id
+    ? 'SELECT * FROM objects WHERE original_id = ? ORDER BY datetime DESC LIMIT 1'
+    : 'SELECT * FROM objects WHERE id = ?';
+  const findParam = original_id ? [original_id] : [id];
+
+  db.get(findSql, findParam, (err, base) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    if (!base) {
+      return res.status(404).json({ error: 'Объект не найден' });
+    }
+
+    const origId = base.original_id || base.id;
+    const now = new Date().toISOString();
+
+        const snail = (by_snail !== undefined && by_snail !== null && by_snail !== '') ? String(by_snail) : (base.by_snail || '9');
+        db.run(`INSERT INTO objects (original_id, object_number, datetime, name, frequency, telemetry, x, y, by_snail, post_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [origId, base.object_number, when, name || base.name, frequency || base.frequency, base.telemetry || '',
+       sk42.x, sk42.y, snail, GLOBAL_POST_ID, now],
+      function(insErr) {
+        if (insErr) {
+          console.error('Ошибка БД:', insErr);
+          return res.status(500).json({ error: 'Ошибка при создании версии' });
+        }
+        res.json({ status: 'ok', new_id: this.lastID, original_id: origId });
+      });
+  });
+});
+
+// Завершить информирование о БпЛА (пометить последнюю версию как завершённую)
+app.post('/api/objects/finish', requireOperatorOrAdmin, (req, res) => {
+  const { original_id } = req.body;
+  if (!original_id) {
+    return res.status(400).json({ error: 'Не указан original_id' });
+  }
+  db.get('SELECT id FROM objects WHERE original_id = ? ORDER BY datetime DESC LIMIT 1', [original_id], (err, row) => {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    if (!row) {
+      return res.status(404).json({ error: 'Объект не найден' });
+    }
+    db.run('UPDATE objects SET is_finished = 1 WHERE id = ?', [row.id], (uerr) => {
+      if (uerr) {
+        console.error('Ошибка БД:', uerr);
+        return res.status(500).json({ error: 'Не удалось завершить информирование' });
+      }
+      res.json({ status: 'ok' });
+    });
+  });
 });
 
 // Удаление объекта (удаляет конкретную версию по id)

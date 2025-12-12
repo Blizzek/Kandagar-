@@ -30,10 +30,25 @@ if not exist "node_modules\" (
     echo.
 )
 
-echo Запуск сервера на http://localhost:3000
+echo.
+echo Выбор базы данных
+set "DEFAULT_DB=%~dp0kandagar.db"
+set /p DB_CHOICE=Укажите путь к файлу БД (Enter = %DEFAULT_DB%): 
+if "%DB_CHOICE%"=="" (set "DB_PATH=%DEFAULT_DB%") else (set "DB_PATH=%DB_CHOICE%")
+
+echo.
+set "DEFAULT_PORT=3000"
+set /p PORT_CHOICE=Укажите порт (Enter = %DEFAULT_PORT%): 
+if "%PORT_CHOICE%"=="" (set "PORT=%DEFAULT_PORT%") else (set "PORT=%PORT_CHOICE%")
+
+echo.
+echo Запуск сервера на http://localhost:%PORT%
+echo Используется БД: %DB_PATH%
 echo Нажмите Ctrl+C для остановки
 echo.
 
-"%NODE%" server.js
+set "DB_PATH=%DB_PATH%"
+set "PORT=%PORT%"
+"%NODE%" server.js --db="%DB_PATH%"
 
 pause
