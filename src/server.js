@@ -17,7 +17,6 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'kandagar-secret-key-change-in-production';
 const SESSION_STORE = (process.env.SESSION_STORE || 'sqlite').toLowerCase();
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
-const CLIENT_MODE = (process.env.CLIENT_MODE || 'false').toLowerCase() === 'true';
 const GLOBAL_POST_ID = process.env.POST_ID ? Number(process.env.POST_ID) : null;
 
 // ПРИМЕЧАНИЕ: Для продакшена рекомендуется добавить:
@@ -61,23 +60,18 @@ db.serialize(() => {
     )
   `);
 
-  // Таблица администраторов (Admin)
-  db.run(`
-    CREATE TABLE IF NOT EXISTS admins (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      password TEXT NOT NULL
-    )
-  `);
-
   // Таблица операторов (Operator)
   db.run(`
     CREATE TABLE IF NOT EXISTS operators (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
-      password TEXT NOT NULL
+      password TEXT NOT NULL,
+      post_id INTEGER
     )
   `);
+
+  // Пытаемся добавить колонку post_id для операторов, если её ещё нет
+  db.run('ALTER TABLE operators ADD COLUMN post_id INTEGER', (err) => {});
 
   // Таблица объектов на карте с версионированием
   db.run(`
@@ -99,7 +93,9 @@ db.serialize(() => {
     )
   `);
 
-  // Пытаемся добавить колонку is_finished, если её ещё нет
+  // Пытаемся добавить колонки в objects, если их ещё нет
+  db.run('ALTER TABLE objects ADD COLUMN telemetry TEXT', (err) => {});
+  db.run('ALTER TABLE objects ADD COLUMN post_id INTEGER', (err) => {});
   db.run('ALTER TABLE objects ADD COLUMN is_finished INTEGER DEFAULT 0', (err) => {});
 
   db.run(`
@@ -145,22 +141,6 @@ db.serialize(() => {
           console.error('Ошибка при создании creator:', err);
         } else {
           console.log('Создан тестовый создатель: creator/creator');
-        }
-      });
-    }
-  });
-
-  // Создание тестового Admin (admin/admin) если его нет
-  db.get('SELECT * FROM admins WHERE username = ?', ['admin'], (err, row) => {
-    if (err) {
-      console.error('Ошибка при проверке admin:', err);
-    } else if (!row) {
-      const hashedPassword = bcrypt.hashSync('admin', 10);
-      db.run('INSERT INTO admins (username, password) VALUES (?, ?)', ['admin', hashedPassword], (err) => {
-        if (err) {
-          console.error('Ошибка при создании admin:', err);
-        } else {
-          console.log('Создан тестовый администратор: admin/admin');
         }
       });
     }
@@ -313,16 +293,16 @@ function requireCreator(req, res, next) {
   }
 }
 
-function requireAdmin(req, res, next) {
-  if (req.session.role === 'admin' || req.session.role === 'creator') {
+function requireOperator(req, res, next) {
+  if (req.session.role === 'operator' || req.session.role === 'creator') {
     next();
   } else {
-    res.status(403).json({ error: 'Требуется авторизация администратора' });
+    res.status(401).json({ error: 'Требуется авторизация оператора' });
   }
 }
 
-function requireOperatorOrAdmin(req, res, next) {
-  if (req.session.role === 'operator' || req.session.role === 'admin' || req.session.role === 'creator') {
+function requireReadOnly(req, res, next) {
+  if (req.session.role === 'operator' || req.session.role === 'creator') {
     next();
   } else {
     res.status(401).json({ error: 'Требуется авторизация' });
@@ -339,8 +319,17 @@ function requireAuth(req, res, next) {
 
 // Схемы валидации
 const credsSchema = z.object({ username: z.string().min(1), password: z.string().min(1) });
-const createUserSchema = z.object({ role: z.enum(['admin', 'operator']), username: z.string().min(1), password: z.string().min(1) });
+const createUserSchema = z.object({
+  role: z.enum(['operator']),
+  username: z.string().min(1),
+  password: z.string().min(1),
+  post_id: z.union([z.string(), z.number()]).transform(Number).optional()
+});
 const deleteUserSchema = z.object({ username: z.string().min(1) });
+const setOperatorPostSchema = z.object({
+  username: z.string().min(1),
+  post_id: z.union([z.string(), z.number()]).transform(Number).refine(Number.isInteger).refine(n => n > 0)
+});
 const moveSchema = z.object({
   id: z.number().int().positive().optional(),
   original_id: z.number().int().positive().optional(),
@@ -363,10 +352,21 @@ const objectCreateSchema = z.object({
   telemetry: z.string().optional()
 });
 
+function resolvePostIdForWrite(req) {
+  if (req.session.role === 'operator') {
+    const postId = Number(req.session.postId);
+    if (Number.isInteger(postId) && postId > 0) return postId;
+  }
+  if (Number.isInteger(GLOBAL_POST_ID) && GLOBAL_POST_ID > 0) {
+    return GLOBAL_POST_ID;
+  }
+  return null;
+}
+
 // API endpoints
 // Конфиг для фронтенда
 app.get('/api/config', (req, res) => {
-  res.json({ clientMode: CLIENT_MODE, postId: GLOBAL_POST_ID });
+  res.json({ postId: GLOBAL_POST_ID });
 });
 // Логин Creator
 app.post('/api/creator-login', (req, res) => {
@@ -404,12 +404,13 @@ app.post('/api/creator-login', (req, res) => {
       req.session.userId = creator.id;
       req.session.username = creator.username;
       req.session.role = 'creator';
+      req.session.postId = null;
       res.json({ status: 'ok', role: 'creator', username: creator.username });
     });
   });
 });
 
-// Логин Admin/Operator
+// Логин Operator
 app.post('/api/user-login', (req, res) => {
   const parsed = credsSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -427,50 +428,26 @@ app.post('/api/user-login', (req, res) => {
       return res.status(403).json({ error: 'IP заблокирован, попробуйте позже' });
     }
 
-    // Сначала проверяем в таблице админов
-    db.get('SELECT * FROM admins WHERE username = ?', [username], (err, admin) => {
+    db.get('SELECT * FROM operators WHERE username = ?', [username], (err, operator) => {
       if (err) {
         console.error('Ошибка БД:', err);
         return res.status(500).json({ error: 'Ошибка сервера' });
       }
 
-      if (admin) {
-        const isValid = bcrypt.compareSync(password, admin.password);
-        logLogin(username, ip, isValid, 'admin');
+      const isValid = operator && bcrypt.compareSync(password, operator.password);
+      logLogin(username, ip, isValid, 'operator');
 
-        if (!isValid) {
-          registerFailedAttempt(ip);
-          return res.status(401).json({ error: 'Неверный логин или пароль' });
-        }
-
-        clearAttempts(ip);
-        req.session.userId = admin.id;
-        req.session.username = admin.username;
-        req.session.role = 'admin';
-        return res.json({ status: 'ok', role: 'admin', username: admin.username });
+      if (!isValid) {
+        registerFailedAttempt(ip);
+        return res.status(401).json({ error: 'Неверный логин или пароль' });
       }
 
-      // Если не нашли в админах, проверяем операторов
-      db.get('SELECT * FROM operators WHERE username = ?', [username], (err, operator) => {
-        if (err) {
-          console.error('Ошибка БД:', err);
-          return res.status(500).json({ error: 'Ошибка сервера' });
-        }
-
-        const isValid = operator && bcrypt.compareSync(password, operator.password);
-        logLogin(username, ip, isValid, 'operator');
-
-        if (!isValid) {
-          registerFailedAttempt(ip);
-          return res.status(401).json({ error: 'Неверный логин или пароль' });
-        }
-
-        clearAttempts(ip);
-        req.session.userId = operator.id;
-        req.session.username = operator.username;
-        req.session.role = 'operator';
-        res.json({ status: 'ok', role: 'operator', username: operator.username });
-      });
+      clearAttempts(ip);
+      req.session.userId = operator.id;
+      req.session.username = operator.username;
+      req.session.role = 'operator';
+      req.session.postId = operator.post_id ? Number(operator.post_id) : null;
+      res.json({ status: 'ok', role: 'operator', username: operator.username, post_id: req.session.postId });
     });
   });
 });
@@ -492,7 +469,8 @@ app.get('/api/check-auth', (req, res) => {
     res.json({ 
       authenticated: true, 
       username: req.session.username,
-      role: req.session.role 
+      role: req.session.role,
+      post_id: req.session.postId || null
     });
   } else {
     res.json({ authenticated: false });
@@ -505,30 +483,16 @@ app.post('/api/users/create', requireCreator, (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: 'Укажите роль, логин и пароль' });
   }
-  const { role, username, password } = parsed.data;
+  const { role, username, password, post_id } = parsed.data;
 
   const hashedPassword = bcrypt.hashSync(password, 10);
   
-  if (role === 'admin') {
-    db.get('SELECT * FROM admins WHERE username = ?', [username], (err, existing) => {
-      if (err) {
-        console.error('Ошибка БД:', err);
-        return res.status(500).json({ error: 'Ошибка сервера' });
-      }
-      if (existing) {
-        return res.status(400).json({ error: 'Админ с таким логином уже существует' });
-      }
-      
-      db.run('INSERT INTO admins (username, password) VALUES (?, ?)', 
-        [username, hashedPassword], (err) => {
-        if (err) {
-          console.error('Ошибка БД:', err);
-          return res.status(500).json({ error: 'Ошибка при создании администратора' });
-        }
-        res.json({ status: 'ok' });
-      });
-    });
-  } else if (role === 'operator') {
+  if (role === 'operator') {
+    const operatorPostId = Number(post_id);
+    if (!Number.isInteger(operatorPostId) || operatorPostId <= 0) {
+      return res.status(400).json({ error: 'Для оператора укажите корректный номер поста' });
+    }
+
     db.get('SELECT * FROM operators WHERE username = ?', [username], (err, existing) => {
       if (err) {
         console.error('Ошибка БД:', err);
@@ -538,8 +502,8 @@ app.post('/api/users/create', requireCreator, (req, res) => {
         return res.status(400).json({ error: 'Оператор с таким логином уже существует' });
       }
       
-      db.run('INSERT INTO operators (username, password) VALUES (?, ?)', 
-        [username, hashedPassword], (err) => {
+      db.run('INSERT INTO operators (username, password, post_id) VALUES (?, ?, ?)', 
+        [username, hashedPassword, operatorPostId], (err) => {
         if (err) {
           console.error('Ошибка БД:', err);
           return res.status(500).json({ error: 'Ошибка при создании оператора' });
@@ -552,7 +516,27 @@ app.post('/api/users/create', requireCreator, (req, res) => {
   }
 });
 
-// Удаление пользователя (Creator и Admin могут удалять операторов, только Creator - админов)
+// Назначение/изменение номера поста оператору (только Creator)
+app.post('/api/users/set-post', requireCreator, (req, res) => {
+  const parsed = setOperatorPostSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Укажите username и корректный номер поста' });
+  }
+  const { username, post_id } = parsed.data;
+
+  db.run('UPDATE operators SET post_id = ? WHERE username = ?', [post_id, username], function(err) {
+    if (err) {
+      console.error('Ошибка БД:', err);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    if (this.changes === 0) {
+      return res.status(404).json({ error: 'Оператор не найден' });
+    }
+    res.json({ status: 'ok' });
+  });
+});
+
+// Удаление пользователя (только операторов, только Creator)
 app.post('/api/users/delete', (req, res) => {
   const parsed = deleteUserSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -560,35 +544,8 @@ app.post('/api/users/delete', (req, res) => {
   }
   const { username } = parsed.data;
 
-  // Creator может удалять всех
+  // Creator может удалять операторов
   if (req.session.role === 'creator') {
-    db.get('SELECT * FROM admins WHERE username = ?', [username], (err, admin) => {
-      if (err) {
-        console.error('Ошибка БД:', err);
-        return res.status(500).json({ error: 'Ошибка сервера' });
-      }
-      
-      if (admin) {
-        db.run('DELETE FROM admins WHERE username = ?', [username], (err) => {
-          if (err) {
-            console.error('Ошибка БД:', err);
-            return res.status(500).json({ error: 'Ошибка сервера' });
-          }
-          return res.json({ status: 'ok' });
-        });
-      } else {
-        db.run('DELETE FROM operators WHERE username = ?', [username], (err) => {
-          if (err) {
-            console.error('Ошибка БД:', err);
-            return res.status(500).json({ error: 'Ошибка сервера' });
-          }
-          res.json({ status: 'ok' });
-        });
-      }
-    });
-  } 
-  // Admin может удалять только операторов
-  else if (req.session.role === 'admin') {
     db.run('DELETE FROM operators WHERE username = ?', [username], (err) => {
       if (err) {
         console.error('Ошибка БД:', err);
@@ -603,30 +560,19 @@ app.post('/api/users/delete', (req, res) => {
 
 // Список пользователей
 app.get('/api/users', requireCreator, (req, res) => {
-  const users = [];
-  
-  db.all('SELECT id, username FROM admins', (err, admins) => {
+  db.all('SELECT id, username, post_id FROM operators', (err, operators) => {
     if (err) {
       console.error('Ошибка БД:', err);
       return res.status(500).json({ error: 'Ошибка сервера' });
     }
-    
-    admins.forEach(a => users.push({ role: 'admin', username: a.username }));
-    
-    db.all('SELECT id, username FROM operators', (err, operators) => {
-      if (err) {
-        console.error('Ошибка БД:', err);
-        return res.status(500).json({ error: 'Ошибка сервера' });
-      }
-      
-      operators.forEach(o => users.push({ role: 'operator', username: o.username }));
-      res.json(users);
-    });
+
+    const users = operators.map(o => ({ role: 'operator', username: o.username, post_id: o.post_id }));
+    res.json(users);
   });
 });
 
 // Получение объектов (возвращаем только последние версии)
-app.get('/api/objects', requireOperatorOrAdmin, (req, res) => {
+app.get('/api/objects', requireReadOnly, (req, res) => {
   db.all('SELECT * FROM objects ORDER BY original_id, datetime', (err, allObjects) => {
     if (err) {
       console.error('Ошибка БД:', err);
@@ -674,7 +620,7 @@ app.get('/api/objects', requireOperatorOrAdmin, (req, res) => {
 });
 
 // Фильтр/табличное представление последних версий
-app.get('/api/objects/filter', requireOperatorOrAdmin, (req, res) => {
+app.get('/api/objects/filter', requireReadOnly, (req, res) => {
   const { name, frequency, date_from, date_to, post_id, by_snail, sort = 'datetime', dir = 'desc' } = req.query;
   const conditions = [];
   const params = [];
@@ -732,7 +678,7 @@ app.get('/api/objects/filter', requireOperatorOrAdmin, (req, res) => {
 });
 
 // Получение маршрута объекта (все версии по original_id)
-app.get('/api/object-route/:original_id', requireOperatorOrAdmin, (req, res) => {
+app.get('/api/object-route/:original_id', requireReadOnly, (req, res) => {
   const { original_id } = req.params;
   
   db.all('SELECT * FROM objects WHERE original_id = ? OR id = ? ORDER BY datetime', 
@@ -778,7 +724,7 @@ app.get('/api/object-route/:original_id', requireOperatorOrAdmin, (req, res) => 
 // Экспорт маршрута в GPX
 
 // Получение следующего номера объекта
-app.get('/api/objects/next-number', requireOperatorOrAdmin, (req, res) => {
+app.get('/api/objects/next-number', requireOperator, (req, res) => {
   db.get('SELECT MAX(CAST(object_number AS INTEGER)) as max_num FROM objects', (err, row) => {
     if (err) {
       console.error('Ошибка БД:', err);
@@ -791,12 +737,13 @@ app.get('/api/objects/next-number', requireOperatorOrAdmin, (req, res) => {
 });
 
 // Создание/редактирование объекта (с версионированием)
-app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
+app.post('/api/objects/create', requireOperator, (req, res) => {
   const parsed = objectCreateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Укажите корректные данные' });
   }
   const { id, object_number, datetime, name, frequency, lon, lat, by_snail, telemetry } = parsed.data;
+  const sessionPostId = resolvePostIdForWrite(req);
   
   if ((lon === undefined) || (lat === undefined)) {
     return res.status(400).json({ error: 'Укажите координаты (lon, lat)' });
@@ -825,12 +772,13 @@ app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
 
       const origId = oldObj.original_id || oldObj.id;
       const now = new Date().toISOString();
+      const postIdForWrite = sessionPostId ?? oldObj.post_id ?? null;
       
       const snail = (by_snail !== undefined && by_snail !== null && by_snail !== '') ? String(by_snail) : (oldObj.by_snail || '9');
       db.run(`INSERT INTO objects (original_id, object_number, datetime, name, frequency, telemetry, x, y, by_snail, post_id, created_at) 
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [origId, oldObj.object_number, datetime, name || oldObj.name, frequency || oldObj.frequency, 
-         telemetry || oldObj.telemetry || '', sk42.x, sk42.y, snail, GLOBAL_POST_ID, now],
+        telemetry || oldObj.telemetry || '', sk42.x, sk42.y, snail, postIdForWrite, now],
         function(err) {
           if (err) {
             console.error('Ошибка БД:', err);
@@ -865,7 +813,7 @@ app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
       const snail = (by_snail !== undefined && by_snail !== null && by_snail !== '') ? String(by_snail) : '9';
       db.run(`INSERT INTO objects (object_number, datetime, name, frequency, telemetry, x, y, by_snail, post_id, created_at) 
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [objNumber, datetime, name || '', frequency || '', telemetry || '', sk42.x, sk42.y, snail, GLOBAL_POST_ID, now],
+        [objNumber, datetime, name || '', frequency || '', telemetry || '', sk42.x, sk42.y, snail, sessionPostId, now],
         function(err) {
           if (err) {
             console.error('Ошибка БД:', err);
@@ -887,12 +835,13 @@ app.post('/api/objects/create', requireOperatorOrAdmin, (req, res) => {
 });
 
 // Перемещение объекта (создание новой версии по id/ original_id)
-app.post('/api/objects/move', requireOperatorOrAdmin, (req, res) => {
+app.post('/api/objects/move', requireOperator, (req, res) => {
   const parsed = moveSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Укажите данные' });
   }
   const { id, original_id, lon, lat, datetime, name, frequency, by_snail } = parsed.data;
+  const sessionPostId = resolvePostIdForWrite(req);
 
   // Конвертация координат
   let sk42;
@@ -922,12 +871,13 @@ app.post('/api/objects/move', requireOperatorOrAdmin, (req, res) => {
 
     const origId = base.original_id || base.id;
     const now = new Date().toISOString();
+    const postIdForWrite = sessionPostId ?? base.post_id ?? null;
 
         const snail = (by_snail !== undefined && by_snail !== null && by_snail !== '') ? String(by_snail) : (base.by_snail || '9');
         db.run(`INSERT INTO objects (original_id, object_number, datetime, name, frequency, telemetry, x, y, by_snail, post_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [origId, base.object_number, when, name || base.name, frequency || base.frequency, base.telemetry || '',
-       sk42.x, sk42.y, snail, GLOBAL_POST_ID, now],
+       sk42.x, sk42.y, snail, postIdForWrite, now],
       function(insErr) {
         if (insErr) {
           console.error('Ошибка БД:', insErr);
@@ -939,7 +889,7 @@ app.post('/api/objects/move', requireOperatorOrAdmin, (req, res) => {
 });
 
 // Завершить информирование о БпЛА (пометить последнюю версию как завершённую)
-app.post('/api/objects/finish', requireOperatorOrAdmin, (req, res) => {
+app.post('/api/objects/finish', requireOperator, (req, res) => {
   const { original_id } = req.body;
   if (!original_id) {
     return res.status(400).json({ error: 'Не указан original_id' });
@@ -963,7 +913,7 @@ app.post('/api/objects/finish', requireOperatorOrAdmin, (req, res) => {
 });
 
 // Удаление объекта (удаляет конкретную версию по id)
-app.post('/api/objects/delete', requireOperatorOrAdmin, (req, res) => {
+app.post('/api/objects/delete', requireOperator, (req, res) => {
   const { id } = req.body;
   
   if (!id) {
@@ -991,7 +941,7 @@ app.post('/api/objects/delete', requireOperatorOrAdmin, (req, res) => {
 });
 
 // Экспорт всех объектов в Word (.docx)
-app.get('/api/export/word', requireOperatorOrAdmin, (req, res) => {
+app.get('/api/export/word', requireReadOnly, (req, res) => {
   const { Document, Packer, Paragraph, Table, TableRow, TableCell, WidthType, TextRun } = require('docx');
   
   db.all('SELECT * FROM objects ORDER BY original_id, datetime', (err, objects) => {

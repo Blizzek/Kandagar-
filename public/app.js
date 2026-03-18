@@ -8,8 +8,7 @@ let routeInterval = null;
 let moveMode = false;
 let moveOriginalId = null;
 let userRole = '';
-let appConfig = { clientMode: false, postId: null };
-let clientMode = false;
+let appConfig = { postId: null };
 let currentFilters = {};
 
 const statusBar = () => document.getElementById('status-bar');
@@ -32,7 +31,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         const cfgResp = await fetch('/api/config');
         if (cfgResp.ok) {
             appConfig = await cfgResp.json();
-            clientMode = !!appConfig.clientMode;
         }
     } catch (cfgErr) {
         console.warn('Не удалось получить конфиг', cfgErr);
@@ -82,12 +80,11 @@ function showAuthForm() {
     document.getElementById('main-container').classList.add('hidden');
 }
 
-function showMainInterface(username, role, cfg = appConfig) {
-    clientMode = !!(cfg && cfg.clientMode);
+function showMainInterface(username, role) {
     document.getElementById('auth-container').classList.add('hidden');
     document.getElementById('main-container').classList.remove('hidden');
 
-    const roleNames = { creator: 'Создатель', admin: 'Администратор', operator: 'Оператор' };
+    const roleNames = { creator: 'Создатель', operator: 'Оператор' };
     document.getElementById('username-display').textContent = `${roleNames[role] || role}: ${username}`;
 
     if (role === 'creator') {
@@ -95,23 +92,25 @@ function showMainInterface(username, role, cfg = appConfig) {
         loadUsers();
     }
 
-    if (clientMode) {
-        const addBtn = document.getElementById('add-marker-btn');
-        if (addBtn) addBtn.classList.add('hidden');
-        const adminPanel = document.getElementById('admin-panel');
-        if (adminPanel) adminPanel.classList.add('hidden');
-    }
-
     initMap();
     loadObjects();
     loadTable(currentFilters);
+}
 
-    if (clientMode) {
-        setInterval(async () => {
-            await loadObjects();
-            await loadTable(currentFilters);
-        }, 40000);
-    }
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function buildMarkerLabel(obj) {
+    const post = obj.post_id ? `Пост ${escapeHtml(obj.post_id)}` : 'Пост -';
+    const objectNum = obj.object_number ? `№ ${escapeHtml(obj.object_number)}` : '№ -';
+    const name = obj.name ? escapeHtml(obj.name) : 'БПЛА';
+    return `${post}<br>${objectNum}<br>${name}`;
 }
 
 document.getElementById('login-form').addEventListener('submit', async (e) => {
@@ -229,8 +228,8 @@ function displayObjects() {
         return;
     }
 
-    const canManage = !clientMode && (userRole === 'creator' || userRole === 'admin' || userRole === 'operator');
-    const canDelete = !clientMode && (userRole === 'creator' || userRole === 'admin');
+    const canManage = userRole === 'creator' || userRole === 'operator';
+    const canDelete = userRole === 'creator';
 
     objects.forEach(obj => {
         if (obj.lat && obj.lon) {
@@ -247,6 +246,12 @@ function displayObjects() {
                     <p><small>СК-42: X=${obj.x || '-'}, Y=${obj.y || '-'}</small></p>
                     <p><small>WGS-84: ${obj.lat.toFixed(6)}, ${obj.lon.toFixed(6)}</small></p>
                 `);
+            marker.bindTooltip(buildMarkerLabel(obj), {
+                permanent: true,
+                direction: 'top',
+                offset: [0, -18],
+                className: 'marker-label'
+            });
             if (marker.dragging) marker.dragging.disable();
 
             marker.on('click', () => {
@@ -569,13 +574,52 @@ function displayUsers(users) {
         const userItem = document.createElement('div');
         userItem.className = 'user-item';
         userItem.innerHTML = `
-            <span><strong>${user.role === 'admin' ? 'Администратор' : 'Оператор'}:</strong> ${user.username}</span>
+            <div class="user-main">
+                <span><strong>Оператор:</strong> ${user.username}</span>
+                <div class="operator-post-controls">
+                    <label>Пост:</label>
+                    <input type="number" class="operator-post-input" min="1" step="1" value="${user.post_id || ''}">
+                    <button class="btn btn-secondary save-post-btn" data-username="${user.username}">Сохранить</button>
+                </div>
+            </div>
             <button class="delete-btn" data-username="${user.username}">Удалить</button>
         `;
+
         const delBtn = userItem.querySelector('.delete-btn');
         delBtn.addEventListener('click', async () => await deleteUser(user.username));
+
+        const savePostBtn = userItem.querySelector('.save-post-btn');
+        if (savePostBtn) {
+            savePostBtn.addEventListener('click', async () => {
+                const input = userItem.querySelector('.operator-post-input');
+                const post = input ? Number(input.value) : NaN;
+                await updateOperatorPost(user.username, post);
+            });
+        }
+
         usersList.appendChild(userItem);
     });
+}
+
+async function updateOperatorPost(username, post_id) {
+    if (!Number.isInteger(post_id) || post_id <= 0) {
+        alert('Укажите корректный номер поста (целое число > 0)');
+        return;
+    }
+    try {
+        const response = await fetch('/api/users/set-post', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, post_id })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Ошибка сохранения номера поста');
+        await loadUsers();
+        setStatus(`Номер поста для ${username} обновлён`, 'info');
+    } catch (error) {
+        console.error('Ошибка:', error);
+        alert(error.message || 'Ошибка сохранения номера поста');
+    }
 }
 
 async function deleteUser(username) {
@@ -602,8 +646,13 @@ const userModal = document.getElementById('add-user-modal');
 const addUserBtn = document.getElementById('add-user-btn');
 const closeUserBtn = document.querySelector('.close-user');
 const cancelUserBtn = document.querySelector('.cancel-user-btn');
+const userPostInput = document.getElementById('user-post-id');
 
-if (addUserBtn) addUserBtn.addEventListener('click', () => userModal.classList.remove('hidden'));
+if (addUserBtn) {
+    addUserBtn.addEventListener('click', () => {
+        userModal.classList.remove('hidden');
+    });
+}
 if (closeUserBtn) closeUserBtn.addEventListener('click', () => userModal.classList.add('hidden'));
 if (cancelUserBtn) cancelUserBtn.addEventListener('click', () => userModal.classList.add('hidden'));
 
@@ -613,15 +662,17 @@ window.addEventListener('click', (e) => {
 
 document.getElementById('add-user-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const role = document.getElementById('user-role').value;
+    const role = 'operator';
     const username = document.getElementById('user-username').value;
     const password = document.getElementById('user-password').value;
+    const postRaw = userPostInput ? userPostInput.value : '';
+    const post_id = Number(postRaw);
 
     try {
         const response = await fetch('/api/users/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ role, username, password })
+            body: JSON.stringify({ role, username, password, post_id })
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Ошибка создания пользователя');

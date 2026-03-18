@@ -49,6 +49,6 @@ echo.
 
 set "DB_PATH=%DB_PATH%"
 set "PORT=%PORT%"
-"%NODE%" server.js --db="%DB_PATH%"
+"%NODE%" src\server.js --db="%DB_PATH%"
 
 pause
